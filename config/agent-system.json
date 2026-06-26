@@ -1,0 +1,1 @@
+{"workers": 3, "queue_max_size": 100, "default_timeout": 300, "heartbeat_interval": 3600, "phases": {"warmup": {"timeout": 60, "checks": ["alert", "calendar"]}, "full": {"timeout": 180, "checks": ["monitor", "finance", "community"]}, "fallback": {"checks": ["cleanup"]}}}
