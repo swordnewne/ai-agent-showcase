@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-金融信号预警系统 - MVP v0.1
+金融信号预警系统 - MVP v0.2
 数据源：新浪财经实时行情（免费，无需token）
 
 推送信号类型：
@@ -18,63 +18,115 @@ import os
 import sys
 import json
 import time
-import hashlib
+import logging
 import argparse
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 import requests
-import urllib.parse
 
-# ========== 配置 ==========
+# ========== 初始化日志 ==========
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+DATE_FORMAT = "%H:%M:%S"
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT)
+logger = logging.getLogger("finance_signal")
+
+# ========== 配置加载 ==========
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIG_PATH = os.path.join(WORKSPACE, "config", "finance_signals.json")
-ALERT_LOG = os.path.join(WORKSPACE, ".alerts", "finance_signals.json")
+STOCK_POOL_PATH = os.path.join(WORKSPACE, "config", "stock_pool.json")
+
+
+def load_config() -> Dict:
+    """加载主配置文件"""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.warning(f"配置文件不存在: {CONFIG_PATH}，使用默认配置")
+        return _default_config()
+    except json.JSONDecodeError as e:
+        logger.error(f"配置文件格式错误: {e}")
+        return _default_config()
+
+
+def _default_config() -> Dict:
+    """默认配置（兜底）"""
+    return {
+        "data_source": {
+            "sina_api": "https://hq.sinajs.cn/list={}",
+            "sina_referer": "https://finance.sina.com.cn"
+        },
+        "thresholds": {
+            "volume_ratio": 2.0,
+            "price_change_big": 5.0,
+            "turnover_min": 1e9,
+            "index_change": 2.0,
+            "index_panic": 2.0,
+            "price_change_limit": 9.5,
+            "cooldown_seconds": 600
+        },
+        "index_codes": {
+            "sh000300": "沪深300",
+            "sz399006": "创业板指",
+            "sh000001": "上证指数"
+        },
+        "cache": {"file": ".alerts/finance_signals.json"},
+        "retry": {"max_attempts": 3, "base_delay": 1.0, "max_delay": 8.0}
+    }
+
+
+def load_stock_pool() -> List[str]:
+    """加载股票池"""
+    try:
+        with open(STOCK_POOL_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("all", [])
+    except FileNotFoundError:
+        logger.warning(f"股票池文件不存在: {STOCK_POOL_PATH}，使用内置默认值")
+        return _default_stock_pool()
+    except json.JSONDecodeError as e:
+        logger.error(f"股票池格式错误: {e}")
+        return _default_stock_pool()
+
+
+def _default_stock_pool() -> List[str]:
+    """默认股票池（兜底）"""
+    return [
+        "600519", "300750", "600030", "000333", "002594", "600276", "600887", "000858",
+        "300760", "601899", "601012", "601318", "600309", "600036", "601288",
+        "300308", "300418", "002475", "300014", "603501", "002230", "300033", "002460",
+        "002371", "603259", "300347", "300124", "002008", "601888", "600999", "300759",
+        "300454", "002812", "300433", "002241", "002142", "300059", "601633", "600438",
+        "603019", "600588", "000977", "002179", "000625", "688235",
+        "688256", "688041", "688111", "688012", "300496", "300223", "688599", "688390",
+        "002151", "300045", "300476", "300502", "300638", "300682", "300782", "688036",
+        "300661", "300474", "002236", "300413", "603444", "002405", "300144", "300003",
+        "600745",
+    ]
+
+
+# 加载配置
+CONFIG = load_config()
+THRESHOLDS = CONFIG["thresholds"]
+INDEX_CODES = CONFIG["index_codes"]
+SINA_API = CONFIG["data_source"]["sina_api"]
+SINA_REFERER = CONFIG["data_source"]["sina_referer"]
+RETRY_CONFIG = CONFIG["retry"]
+
+# 缓存文件路径
+ALERT_LOG = os.path.join(WORKSPACE, CONFIG["cache"]["file"])
 os.makedirs(os.path.dirname(ALERT_LOG), exist_ok=True)
 
-# 股票池：从聚宽策略提取的80只票
-STOCK_POOL = [
-    # 大盘
-    "600519", "300750", "600030", "000333", "002594", "600276", "600887", "000858",
-    "300760", "601899", "601012", "601318", "600309", "600036", "601288",
-    # 中盘
-    "300308", "300418", "002475", "300014", "603501", "002230", "300033", "002460",
-    "002371", "603259", "300347", "300124", "002008", "601888", "600999", "300759",
-    "300454", "002812", "300433", "002241", "002142", "300059", "601633", "600438",
-    "603019", "600588", "000977", "002179", "000625", "688235",
-    # 小盘
-    "688256", "688041", "688111", "688012", "300496", "300223", "688599", "688390",
-    "002151", "300045", "300476", "300502", "300638", "300682", "300782", "688036",
-    "300661", "300474", "002236", "300413", "603444", "002405", "300144", "300003",
-    "600745",
-]
+# 股票池（从配置热加载）
+STOCK_POOL = load_stock_pool()
 
-# 指数代码
-INDEX_CODES = {
-    "sh000300": "沪深300",
-    "sz399006": "创业板指",
-    "sh000001": "上证指数",
-}
 
-# 新浪API
-SINA_API = "https://hq.sinajs.cn/list={}"
-SINA_REFERER = "https://finance.sina.com.cn"
-
-# 异常阈值
-THRESHOLDS = {
-    "volume_ratio": 2.0,        # 成交量 > 5日均量2倍（MVP暂用成交额阈值）
-    "price_change_big": 5.0,    # 涨跌幅 ≥5% 才推（收紧）
-    "turnover_min": 1e9,        # 成交额 ≥10亿（收紧）
-    "index_change": 2.0,        # 大盘涨跌幅 ±2%
-    "index_panic": 2.0,         # 大盘跌≥2%时进入恐慌模式（降噪）
-    "price_change_limit": 9.5,  # 接近涨跌停 ±9.5%
-    "cooldown_seconds": 600,    # 同一标的冷却10分钟（延长）
-}
-
+# ========== 工具函数 ==========
 
 def load_sent_cache() -> Dict:
     """加载已发送信号的缓存（防重复）"""
     try:
-        with open(ALERT_LOG, "r") as f:
+        with open(ALERT_LOG, "r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
@@ -82,7 +134,7 @@ def load_sent_cache() -> Dict:
 
 def save_sent_cache(cache: Dict):
     """保存已发送信号缓存"""
-    with open(ALERT_LOG, "w") as f:
+    with open(ALERT_LOG, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
@@ -99,30 +151,57 @@ def mark_sent(stock_code: str, signal_type: str, cache: Dict):
     cache[key] = time.time()
 
 
+def _retry_with_backoff(func, *args, **kwargs):
+    """指数退避重试装饰器"""
+    max_attempts = RETRY_CONFIG["max_attempts"]
+    base_delay = RETRY_CONFIG["base_delay"]
+    max_delay = RETRY_CONFIG["max_delay"]
+    
+    last_exception = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            if attempt >= max_attempts:
+                break
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(f"请求失败（第{attempt}次）: {e}，{delay}s后重试...")
+            time.sleep(delay)
+    
+    logger.error(f"请求失败（共{max_attempts}次）: {last_exception}")
+    return None
+
+
+# ========== 数据获取 ==========
+
 def fetch_sina_quotes(codes: List[str]) -> Dict[str, Dict]:
-    """从新浪财经获取实时行情
+    """从新浪财经获取实时行情（带重试）
     
     返回: {code: {name, price, change_pct, volume, turnover, high, low, open, pre_close}}
     """
+    if not codes:
+        return {}
+    
     # 新浪要求code格式: sh600519, sz000858
     sina_codes = []
     for c in codes:
         if c.startswith(("sh", "sz")):
-            # 已经是新浪格式
             sina_codes.append(c)
         else:
-            prefix = "sh" if c.startswith("6") or c.startswith("688") else "sz"
+            prefix = "sh" if c.startswith(("6", "688")) else "sz"
             sina_codes.append(f"{prefix}{c}")
     
     url = SINA_API.format(",".join(sina_codes))
     headers = {"Referer": SINA_REFERER}
     
-    try:
+    def _do_request():
         r = requests.get(url, headers=headers, timeout=10)
         r.encoding = "gb2312"
-        text = r.text
-    except Exception as e:
-        print(f"[ERROR] 获取行情失败: {e}")
+        return r.text
+    
+    text = _retry_with_backoff(_do_request)
+    if text is None:
         return {}
     
     results = {}
@@ -131,49 +210,50 @@ def fetch_sina_quotes(codes: List[str]) -> Dict[str, Dict]:
         if not line or "=" not in line:
             continue
         
-        code_part, data_part = line.split("=", 1)
-        code = code_part.split("_")[-1]  # sh600519 → 600519
-        data = data_part.strip('"').split(",")
-        
-        if len(data) < 30:
+        try:
+            code_part, data_part = line.split("=", 1)
+            code = code_part.split("_")[-1]  # sh600519 → 600519
+            data = data_part.strip('"').split(",")
+            
+            if len(data) < 30:
+                continue
+            
+            name = data[0]
+            open_price = float(data[1]) if data[1] else 0
+            pre_close = float(data[2]) if data[2] else 0
+            price = float(data[3]) if data[3] else 0
+            high = float(data[4]) if data[4] else 0
+            low = float(data[5]) if data[5] else 0
+            volume = int(data[8]) if data[8] else 0
+            turnover = float(data[9]) if data[9] else 0
+            
+            change_pct = round((price - pre_close) / pre_close * 100, 2) if pre_close else 0
+            
+            results[code] = {
+                "name": name,
+                "price": price,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "pre_close": pre_close,
+                "change_pct": change_pct,
+                "volume": volume,
+                "turnover": turnover,
+            }
+        except (ValueError, IndexError) as e:
+            logger.debug(f"解析行情数据出错: {e} | 行: {line[:50]}...")
             continue
-        
-        # 新浪数据字段解析（顺序固定）
-        # 0:名称, 1:今日开盘价, 2:昨日收盘价, 3:当前价, 4:今日最高价, 5:今日最低价
-        # 6:买一价, 7:卖一价, 8:成交量(股), 9:成交额(元)
-        # ...后面是买卖盘，不需要
-        name = data[0]
-        open_price = float(data[1]) if data[1] else 0
-        pre_close = float(data[2]) if data[2] else 0
-        price = float(data[3]) if data[3] else 0
-        high = float(data[4]) if data[4] else 0
-        low = float(data[5]) if data[5] else 0
-        volume = int(data[8]) if data[8] else 0
-        turnover = float(data[9]) if data[9] else 0
-        
-        change_pct = round((price - pre_close) / pre_close * 100, 2) if pre_close else 0
-        
-        results[code] = {
-            "name": name,
-            "price": price,
-            "open": open_price,
-            "high": high,
-            "low": low,
-            "pre_close": pre_close,
-            "change_pct": change_pct,
-            "volume": volume,
-            "turnover": turnover,
-        }
     
     return results
 
 
 def fetch_index_quotes() -> Dict[str, Dict]:
     """获取大盘指数实时行情"""
-    # 指数代码直接用新浪格式
     index_sina_codes = ["sh000300", "sz399006", "sh000001"]
     return fetch_sina_quotes(index_sina_codes)
 
+
+# ========== 信号检测 ==========
 
 def check_volume_anomaly(stock_code: str, data: Dict, history: Dict, market_panic: bool = False) -> Optional[Dict]:
     """检查个股异常放量/缩量
@@ -211,8 +291,6 @@ def check_limit_up_down(stock_code: str, data: Dict) -> Optional[Dict]:
     # 科创板/创业板涨停20%，主板10%
     is_kc_cy = stock_code.startswith("688") or stock_code.startswith("300")
     limit_pct = 20.0 if is_kc_cy else 10.0
-    
-    # 接近涨停/跌停（±9.5% 或 ±19%）
     near_limit = limit_pct - 0.5
     
     if change_pct >= near_limit:
@@ -260,115 +338,87 @@ def check_index_anomaly(index_code: str, data: Dict) -> Optional[Dict]:
     return None
 
 
-def fetch_stock_news(stock_code: str, stock_name: str) -> List[Dict]:
-    """获取个股最新新闻（东方财富）
-    
-    返回最近3条相关新闻
-    """
-    # 东方财富个股新闻API
-    # 格式: https://searchapi.eastmoney.com/api/suggest/get?input=600519&type=14&count=3
-    # 或者直接用页面爬取
-    
-    # 简化：用新浪财经的个股新闻RSS（更稳定）
-    # 实际生产建议用付费API或自建爬虫
-    
-    # MVP阶段：返回空，新闻渠道后续接入
-    # 原因：免费新闻API结构不稳定，需要单独维护
-    return []
-
-
 def check_news_signals() -> List[Dict]:
-    """检查突发新闻信号
-    
-    待接入：
-    - 东方财富快讯API
-    - 财联社电报
-    - 上市公司公告（巨潮资讯）
-    - 宏观政策（央行/证监会）
-    
-    MVP阶段返回空列表，预留接口
-    """
-    # TODO: 接入新闻源
-    # 方案1: AKShare stock_news_em() - 需要稳定网络
-    # 方案2: 东方财富搜索API - 结构可能变化
-    # 方案3: 自建爬虫 - 需要反爬策略
+    """检查突发新闻信号（MVP阶段预留接口）"""
     return []
 
+
+# ========== 推送格式化 ==========
 
 def format_alert(signal: Dict) -> str:
     """格式化推送消息"""
-    now = datetime.now(timezone(timedelta(hours=8)))
-    time_str = now.strftime("%H:%M")
-    
-    lines = [
-        f"【交易预警 {time_str}】",
-        f"",
-        f"{signal['title']}",
-        f"",
-        f"{signal['content']}",
-    ]
-    
-    if signal["type"] in ("limit_up", "limit_down"):
-        lines.append("")
-        lines.append("⚠️ 注意止盈止损")
-    
-    return "\n".join(lines)
+    level_emoji = {"urgent": "🔴", "warning": "🟡", "info": "🔵"}
+    emoji = level_emoji.get(signal.get("level", "info"), "🔵")
+    return f"{emoji} {signal['title']}\n\n{signal['content']}"
 
 
-def send_wechat_alert(message: str) -> bool:
-    """发送微信推送"""
-    # 通过OpenClaw的message工具发送
-    # 这里写文件，由外部定时任务读取后调用message工具
-    alert_file = os.path.join(WORKSPACE, ".alerts", "pending_wechat.json")
+def send_wechat_alert(msg: str) -> bool:
+    """发送微信推送（通过写文件+独立脚本读取）"""
     try:
+        pending_file = os.path.join(WORKSPACE, ".alerts", "pending_wechat.json")
         alerts = []
-        if os.path.exists(alert_file):
-            with open(alert_file, "r") as f:
+        if os.path.exists(pending_file):
+            with open(pending_file, "r", encoding="utf-8") as f:
                 alerts = json.load(f)
         alerts.append({
-            "timestamp": datetime.now(timezone(timedelta(hours=8))).isoformat(),
-            "message": message,
+            "time": datetime.now(timezone(timedelta(hours=8))).isoformat(),
+            "msg": msg
         })
-        with open(alert_file, "w") as f:
+        with open(pending_file, "w", encoding="utf-8") as f:
             json.dump(alerts, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        print(f"[ERROR] 保存推送消息失败: {e}")
+        logger.error(f"写入推送队列失败: {e}")
         return False
 
 
+# ========== 主流程 ==========
+
 def run_realtime_scan():
-    """交易时段实时扫描"""
-    print(f"[{datetime.now(timezone(timedelta(hours=8))).strftime('%H:%M:%S')}] 开始扫描...")
+    """实时扫描（交易时段）"""
+    now = datetime.now(timezone(timedelta(hours=8)))
+    logger.info(f"{'='*50}")
+    logger.info(f"金融信号实时扫描开始 | {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"股票池: {len(STOCK_POOL)}只 | 缓存: {ALERT_LOG}")
+    logger.info(f"{'='*50}")
     
     cache = load_sent_cache()
     signals = []
     
-    # 1. 获取股票池行情
+    # 1. 获取个股行情
+    logger.info("获取个股行情...")
     stock_quotes = fetch_sina_quotes(STOCK_POOL)
-    print(f"  获取 {len(stock_quotes)} 只股票行情")
+    if not stock_quotes:
+        logger.error("个股行情获取失败，本次扫描终止")
+        return []
+    logger.info(f"成功获取 {len(stock_quotes)} 只个股行情")
     
     # 2. 获取大盘指数
+    logger.info("获取大盘指数...")
     index_quotes = fetch_index_quotes()
-    print(f"  获取 {len(index_quotes)} 个指数行情")
+    if not index_quotes:
+        logger.warning("大盘指数获取失败，跳过指数检测")
+    else:
+        logger.info(f"成功获取 {len(index_quotes)} 个指数行情")
     
-    # 3. 判断大盘状态（是否恐慌）
+    # 3. 判断大盘状态
     market_panic = False
     sh300 = index_quotes.get("sh000300", {})
     if sh300:
         change_300 = sh300.get("change_pct", 0)
         if change_300 <= -THRESHOLDS["index_panic"]:
             market_panic = True
-            print(f"  ⚠️ 大盘恐慌模式（沪深300 {change_300}%），降噪处理")
+            logger.warning(f"⚠️ 大盘恐慌模式（沪深300 {change_300}%），降噪处理")
     
     # 4. 个股检测
+    logger.info("扫描个股信号...")
     for code, data in stock_quotes.items():
         # 涨停/跌停预警（最高优先级，不受恐慌模式影响）
         signal = check_limit_up_down(code, data)
         if signal and is_cooled_down(code, signal["type"], cache):
             signals.append(signal)
             mark_sent(code, signal["type"], cache)
-            continue  # 涨停了就不需要再检查放量了
+            continue
         
         # 异常放量（恐慌模式下收紧）
         signal = check_volume_anomaly(code, data, {}, market_panic=market_panic)
@@ -377,11 +427,13 @@ def run_realtime_scan():
             mark_sent(code, signal["type"], cache)
     
     # 5. 大盘检测
-    for code, data in index_quotes.items():
-        signal = check_index_anomaly(code, data)
-        if signal and is_cooled_down(code, signal["type"], cache):
-            signals.append(signal)
-            mark_sent(code, signal["type"], cache)
+    if index_quotes:
+        logger.info("扫描大盘信号...")
+        for code, data in index_quotes.items():
+            signal = check_index_anomaly(code, data)
+            if signal and is_cooled_down(code, signal["type"], cache):
+                signals.append(signal)
+                mark_sent(code, signal["type"], cache)
     
     # 6. 新闻信号（预留）
     news_signals = check_news_signals()
@@ -391,84 +443,68 @@ def run_realtime_scan():
             mark_sent("news", sig.get("type", "news"), cache)
     
     # 7. 推送
+    logger.info(f"扫描完成，发现 {len(signals)} 个信号")
     sent_count = 0
     for sig in signals:
         msg = format_alert(sig)
-        print(f"\n{'='*40}\n{msg}\n{'='*40}")
+        logger.info(f"\n{'='*40}\n{msg}\n{'='*40}")
         if send_wechat_alert(msg):
             sent_count += 1
     
     save_sent_cache(cache)
-    print(f"\n扫描完成，发现 {len(signals)} 个信号，推送 {sent_count} 条")
+    logger.info(f"推送完成: {sent_count}/{len(signals)} 条")
     if market_panic:
-        print("  （恐慌模式：仅推送涨跌停和大盘异动）")
+        logger.info("（恐慌模式：仅推送涨跌停和大盘异动）")
     return signals
 
 
 def run_daily_summary():
     """收盘后日终总结"""
-    print("生成日终总结...")
+    now = datetime.now(timezone(timedelta(hours=8)))
+    logger.info(f"{'='*50}")
+    logger.info(f"日终总结 | {now.strftime('%Y-%m-%d')}")
+    logger.info(f"{'='*50}")
     
     stock_quotes = fetch_sina_quotes(STOCK_POOL)
-    index_quotes = fetch_index_quotes()
+    if not stock_quotes:
+        logger.error("行情获取失败")
+        return
     
-    # 统计涨跌停
-    limit_up = []
-    limit_down = []
-    big_movers = []  # 涨跌幅>5%
+    # 统计
+    up_count = sum(1 for d in stock_quotes.values() if d["change_pct"] > 0)
+    down_count = sum(1 for d in stock_quotes.values() if d["change_pct"] < 0)
+    limit_up = [c for c, d in stock_quotes.items() if d["change_pct"] >= 9.5]
+    limit_down = [c for c, d in stock_quotes.items() if d["change_pct"] <= -9.5]
     
-    for code, data in stock_quotes.items():
-        cp = data["change_pct"]
-        if cp >= 9.5:
-            limit_up.append((code, data))
-        elif cp <= -9.5:
-            limit_down.append((code, data))
-        elif abs(cp) >= 5:
-            big_movers.append((code, data))
+    summary = (
+        f"📊 今日复盘 ({now.strftime('%m-%d')})\n"
+        f"上涨: {up_count}只 | 下跌: {down_count}只\n"
+        f"涨停: {len(limit_up)}只 | 跌停: {len(limit_down)}只\n"
+    )
+    if limit_up:
+        names = [stock_quotes[c]["name"] for c in limit_up[:5]]
+        summary += f"🔥 涨停: {', '.join(names)}{'...' if len(limit_up) > 5 else ''}\n"
+    if limit_down:
+        names = [stock_quotes[c]["name"] for c in limit_down[:5]]
+        summary += f"💥 跌停: {', '.join(names)}{'...' if len(limit_down) > 5 else ''}\n"
     
-    # 按涨跌幅排序
-    top_gainers = sorted(stock_quotes.items(), key=lambda x: x[1]["change_pct"], reverse=True)[:5]
-    top_losers = sorted(stock_quotes.items(), key=lambda x: x[1]["change_pct"])[:5]
-    
-    now = datetime.now(timezone(timedelta(hours=8)))
-    lines = [
-        f"【{now.strftime('%m月%d日')} 收盘总结】",
-        "",
-        "📊 大盘",
-    ]
-    for code, data in index_quotes.items():
-        name = INDEX_CODES.get(code, code)
-        cp = data["change_pct"]
-        emoji = "📈" if cp > 0 else "📉"
-        lines.append(f"  {emoji} {name}: {data['price']:.2f} ({'+' if cp > 0 else ''}{cp}%)")
-    
-    lines.extend([
-        "",
-        f"🔥 涨停 {len(limit_up)} 只",
-        f"💥 跌停 {len(limit_down)} 只",
-        f"📈📉 涨跌幅>5%: {len(big_movers)} 只",
-        "",
-        "🏆 涨幅TOP5",
-    ])
-    for code, data in top_gainers:
-        lines.append(f"  {data['name']}({code}): +{data['change_pct']}%")
-    
-    lines.append("")
-    lines.append("📉 跌幅TOP5")
-    for code, data in top_losers:
-        lines.append(f"  {data['name']}({code}): {data['change_pct']}%")
-    
-    msg = "\n".join(lines)
-    print(f"\n{'='*40}\n{msg}\n{'='*40}")
-    send_wechat_alert(msg)
-    return msg
+    logger.info(f"\n{summary}")
+    send_wechat_alert(summary)
+    return summary
 
+
+# ========== 入口 ==========
 
 def main():
     parser = argparse.ArgumentParser(description="金融信号预警系统")
     parser.add_argument("--mode", choices=["realtime", "summary"], default="realtime",
-                        help="运行模式: realtime=实时检测, summary=日终总结")
+                        help="运行模式: realtime(实时检测) / summary(日终总结)")
+    parser.add_argument("--debug", action="store_true", help="开启DEBUG日志")
     args = parser.parse_args()
+    
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("DEBUG模式已开启")
     
     if args.mode == "realtime":
         run_realtime_scan()

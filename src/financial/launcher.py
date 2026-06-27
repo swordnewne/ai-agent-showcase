@@ -13,9 +13,10 @@ from datetime import datetime, timezone, timedelta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-def run(cmd):
-    print(f"[RUN] {cmd}")
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+def run(cmd_list):
+    """安全执行命令（shell=False）"""
+    print(f"[RUN] {' '.join(cmd_list)}")
+    result = subprocess.run(cmd_list, shell=False, capture_output=True, text=True)
     print(result.stdout)
     if result.stderr:
         print(result.stderr, file=sys.stderr)
@@ -30,14 +31,14 @@ def main():
     
     # 1. 运行信号检测
     pipeline = os.path.join(BASE, "signal_pipeline.py")
-    ok = run(f"python3 {pipeline} --mode {mode}")
+    ok = run(["python3", pipeline, "--mode", mode])
     
     if not ok:
         print("[WARN] 信号检测未正常完成")
     
     # 2. 推送微信消息
     pusher = os.path.join(BASE, "wechat_pusher.py")
-    run(f"python3 {pusher}")
+    run(["python3", pusher])
     
     print(f"\n{'='*60}")
     print(f"运行完成 {now.strftime('%H:%M:%S')}")

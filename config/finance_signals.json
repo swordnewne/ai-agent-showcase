@@ -1,0 +1,38 @@
+{
+  "_comment": "金融信号预警系统 - 主配置",
+  "version": "0.1",
+  "data_source": {
+    "primary": "sina",
+    "fallback": null,
+    "sina_api": "https://hq.sinajs.cn/list={}",
+    "sina_referer": "https://finance.sina.com.cn"
+  },
+  "thresholds": {
+    "volume_ratio": 2.0,
+    "price_change_big": 5.0,
+    "turnover_min": 1000000000,
+    "index_change": 2.0,
+    "index_panic": 2.0,
+    "price_change_limit": 9.5,
+    "cooldown_seconds": 600
+  },
+  "index_codes": {
+    "sh000300": "沪深300",
+    "sz399006": "创业板指",
+    "sh000001": "上证指数"
+  },
+  "cache": {
+    "file": ".alerts/finance_signals.json",
+    "max_age_hours": 24
+  },
+  "retry": {
+    "max_attempts": 3,
+    "base_delay": 1.0,
+    "max_delay": 8.0
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s [%(levelname)s] %(message)s",
+    "datefmt": "%H:%M:%S"
+  }
+}
