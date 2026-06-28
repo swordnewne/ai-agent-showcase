@@ -20,6 +20,8 @@ import json
 import time
 import logging
 import argparse
+import sqlite3
+import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 import requests
@@ -34,6 +36,71 @@ logger = logging.getLogger("finance_signal")
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIG_PATH = os.path.join(WORKSPACE, "config", "finance_signals.json")
 STOCK_POOL_PATH = os.path.join(WORKSPACE, "config", "stock_pool.json")
+
+# ========== 信号记录到复盘数据库（新增：2026-06-28）==========
+_FINANCE_DB = os.path.join(WORKSPACE, "data", "finance.db")
+
+
+def _extract_code_from_title(title: str) -> str:
+    """从标题中提取股票代码，如 '寒武纪(sh688256)' -> '688256'"""
+    # 匹配 (688256) 或 (sh688256) 或 (sz002475)
+    m = re.search(r'\((?:sh|sz)?([0-9]{6})\)', title)
+    return m.group(1) if m else ""
+
+
+def _extract_price_from_content(content: str) -> float:
+    """从内容中提取当前价格，如 '当前: 1480.50' -> 1480.5"""
+    m = re.search(r'当前[:：]\s*([0-9]+\.?[0-9]*)', content)
+    return float(m.group(1)) if m else 0.0
+
+
+def _infer_signal_type(sig_type: str, title: str) -> str:
+    """根据信号类型推断买卖方向"""
+    if sig_type in ("limit_up", "volume_anomaly") or "涨" in title or "突破" in title:
+        return "buy"
+    elif sig_type in ("limit_down",) or "跌" in title or "跌停" in title:
+        return "sell"
+    return "hold"
+
+
+def record_signal_from_pipeline(signal: Dict):
+    """把 signal_pipeline 产生的信号写入复盘数据库"""
+    try:
+        code = _extract_code_from_title(signal.get("title", ""))
+        if not code:
+            return
+        price = _extract_price_from_content(signal.get("content", ""))
+        sig_type = _infer_signal_type(signal.get("type", ""), signal.get("title", ""))
+        reason = signal.get("content", "")[:200]
+        
+        conn = sqlite3.connect(_FINANCE_DB)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS decision_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT UNIQUE,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                signal_type TEXT NOT NULL,
+                confidence INTEGER DEFAULT 5,
+                reason TEXT,
+                target_price REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        now = datetime.now().isoformat()
+        signal_id = f"SP-{now.replace(':', '').replace('-', '').replace('.', '')}-{code}"
+        
+        cursor.execute('''
+            INSERT OR IGNORE INTO decision_signals
+            (signal_id, stock_code, signal_type, target_price, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (signal_id, code, sig_type, price, reason, now))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"记录信号到复盘库失败: {e}")
 
 
 def load_config() -> Dict:
@@ -448,6 +515,7 @@ def run_realtime_scan():
     for sig in signals:
         msg = format_alert(sig)
         logger.info(f"\n{'='*40}\n{msg}\n{'='*40}")
+        record_signal_from_pipeline(sig)
         if send_wechat_alert(msg):
             sent_count += 1
     

@@ -1,0 +1,110 @@
+# 股票池配置
+# 分类: holding=持仓, watchlist=关注, blocked=排除
+
+stocks:
+  # 核心持仓（20只）
+  - symbol: "600519.SH"
+    name: "贵州茅台"
+    category: "holding"
+    max_position_pct: 0.15
+
+  - symbol: "300750.SZ"
+    name: "宁德时代"
+    category: "holding"
+    max_position_pct: 0.10
+
+  - symbol: "300308.SZ"
+    name: "中际旭创"
+    category: "holding"
+    max_position_pct: 0.10
+
+  - symbol: "600030.SH"
+    name: "中信证券"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "000333.SZ"
+    name: "美的集团"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "002475.SZ"
+    name: "立讯精密"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "600276.SH"
+    name: "恒瑞医药"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "300418.SZ"
+    name: "昆仑万维"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "002594.SZ"
+    name: "比亚迪"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "000858.SZ"
+    name: "五粮液"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "601318.SH"
+    name: "中国平安"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "600887.SH"
+    name: "伊利股份"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "002230.SZ"
+    name: "科大讯飞"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "300014.SZ"
+    name: "亿纬锂能"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "601012.SH"
+    name: "隆基绿能"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "300760.SZ"
+    name: "迈瑞医疗"
+    category: "holding"
+    max_position_pct: 0.08
+
+  - symbol: "601899.SH"
+    name: "紫金矿业"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "000725.SZ"
+    name: "京东方A"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "603501.SH"
+    name: "韦尔股份"
+    category: "holding"
+    max_position_pct: 0.05
+
+  - symbol: "600809.SH"
+    name: "山西汾酒"
+    category: "holding"
+    max_position_pct: 0.08
+
+  # 关注池（示例）
+  # - symbol: "688981.SH"
+  #   name: "中芯国际"
+  #   category: "watchlist"
+  #   max_position_pct: 0.05

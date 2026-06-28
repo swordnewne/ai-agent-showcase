@@ -1,143 +1,72 @@
-# AI Agent Showcase — 从需求到落地的硬成果
+# Showcase 股票交易系统 - 构建状态
 
-> **一句话定位**：不是"会调API"，是"给模糊需求→拆可执行方案→跑通并量化"的全链路AI工程能力。
+## 当前完成度
 
----
+### 核心模块（全部完成）
 
-> **闽江学院 数据科学与大数据技术 | 2026届 | AI Agent全栈实践**
+| 模块 | 文件 | 状态 | 说明 |
+|------|------|------|------|
+| 数据库 | data/db_schema.sql | ✅ | 6张表已初始化 |
+| 数据适配 | data_provider.py | ✅ | 新浪API实时 + akshare历史K线 |
+| 大盘上下文 | market_context.py | ✅ | 真实指数数据 + 规则化摘要 |
+| AI客户端 | ai_client.py | ✅ | 支持Kimi/DeepSeek/OpenAI |
+| 持仓追踪 | portfolio_tracker.py | ✅ | FIFO成本 + 防超卖 + 快照 |
+| 评分器 | stock_analyzer.py | ✅ | 6维度100分制 |
+| 凯利仓位 | kelly_position.py | ✅ | 大盘环境调整 + 硬约束 |
+| 信号追踪 | signal_tracker.py | ✅ | 创建→验证→准确率统计 |
+| 报告生成 | report_generator.py | ✅ | 纯文本微信友好格式 |
+| 统一调度 | launcher.py | ✅ | 盘前/盘后一键执行 |
+| 定时脚本 | scripts/daily_run.py | ✅ | cron就绪 |
+| 股票池 | config/stock_pool.yaml | ✅ | 20只持仓已配置 |
 
-## 🎯 四个核心项目
-
-| 项目 | 业务场景 | 核心数据 | 技术关键词 |
-|------|---------|---------|-----------|
-| [金融信号预警系统](./src/financial/) | 基于新浪API实时行情，异常检测+恐慌降噪+微信推送 | **80只**股票池监测、**5分钟**级检测、**恐慌模式**自动降噪 | 新浪财经API、阈值引擎、Cron定时、异常检测 |
-| [社区学习Agent](./src/community/) | AI在社区自主互动、学习、发帖 | **SSR级**76.67分、**日互动20-30条**、内容A/B实验、**150条/日**限流 | 动态素材、质量门、限流管控、自动体检 |
-| [Agent自治系统](./src/agent-orchestration/) | 事件驱动的任务调度与自治运维 | **事件路由**+状态机、**自检自愈**（磁盘/API/编码）、**配置即代码** | 优先级队列、检查点、插件化 |
-| [持续学习Agent](./src/self-improving/) | 从用户纠正中自动提取模式、升级本能 | **25+**纠正关键词检测、置信度**≥3次**自动升级SKILL.md规则 | 模式聚类、ECC持续学习、本能进化 |
-
----
-
-## 📊 数据说话
-
-```
-金融信号：     80只监测 │ 5分钟级检测 │ 恐慌模式降噪 │ 涨跌停+大盘异动+放量
-社区Agent：    SSR级    │ 76.67分  │ 日互动20-30条 │ A/B实验+限流+自动体检
-Agent调度：    事件驱动  │ 状态机管理 │ 自检自愈    │ 配置即代码
-持续学习：     25+关键词 │ 置信度聚类 │ 自动升级规则 │ 越用越懂你
-数据清洗：     4阶段流水线 │ 质量评分45→82 │ 异常检测  │
-模型评测：     情感/板块/幻觉/延迟 │ 4维对比报告 │
-RAG知识库：    本地Embedding │ FAISS向量检索 │ Top-K命中率评测 │
-基础设施：     磁盘85%告警+清理 │ 30天session归档 │ 7天报告清理 │
-```
-
----
-
-## 🏗️ 系统架构
-
-**核心设计**：事件驱动 + 状态机 + 共享数据层 + 持续学习闭环
-
-- **事件层**：用户消息 / 定时触发 / 系统告警 / 心跳信号
-- **路由器**：优先级队列 + 状态机（PENDING→RUNNING→SUCCESS|FAILED|TIMEOUT）
-- **执行层**：对话处理器 / 金融AI / 社区学习 / 系统监控
-- **数据层**：RAG知识库 / 数据清洗 / 模型评测 / 分层记忆（共享服务，按需调用）
-- **学习层**：纠正检测 → 模式聚类 → 置信度升级 → SKILL.md规则写入
-- **存储层**：SQLite / JSON / FAISS / 配置文件
-
-**自检自愈**：磁盘85%自动清理、API超时指数退避、编码失败自动切换、任务失败3次重试
-
-**持续学习**：用户说"不对""错了"→自动记录→出现3次→升级为规则→AI越用越懂你
-
-**详细设计**：[docs/architecture.md](docs/architecture.md) | **调度器代码**：[src/agent-orchestration/scheduler.py](src/agent-orchestration/scheduler.py)
-
----
-
-## 🛠️ 技术栈
-
-**架构**：事件驱动、状态机、配置即代码、插件化、检查点机制、持续学习闭环
-**AI/ML**：DeepSeek API、Sentence-Transformers(本地Embedding)、FAISS(向量检索)、凯利公式
-**数据**：pandas(清洗)、SQLite(存储)、RAG(检索增强)
-**自动化**：OpenClaw Agent框架、cron、HEARTBEAT巡检、A/B内容实验、自动体检
-**工程**：TypeScript严格模式、Result<T,E>、接口定义优先、25+纠正关键词检测
-
----
-
-## 🚀 快速运行
+### 当前已能产生真实数据驱动的报告
 
 ```bash
-pip install -r requirements.txt
-
-# 金融信号预警系统（实时行情+异常检测+微信推送）
-cd src/financial/
-python3 launcher.py realtime    # 实时检测（涨幅≥5% + 成交额≥10亿 / 涨跌停 / 大盘异动）
-python3 launcher.py summary     # 收盘总结（大盘 + 涨跌停 + TOP5）
-python3 launcher.py warmup      # 盘前预热
-bash setup_cron.sh              # 配置定时任务（交易时段每5分钟扫描）
-
-# Agent调度器（事件路由+状态机演示）
-python src/agent-orchestration/scheduler.py
-
-# 持续学习系统（记录纠正+聚类升级，需先创建 self-improving/instincts/ 目录）
-python src/self-improving/instinct_system.py --record "不要中英文混用" --context "之前回复"
-python src/self-improving/instinct_system.py --evolve
-
-# RAG知识库构建
-python src/rag-knowledge-base/build_index.py
-
-# 数据清洗流水线
-python src/dataset-cleaning/pipeline.py
-
-# 模型评测对比
-python src/model-evaluation/framework.py
-
-# 基础设施巡检
-python src/infrastructure/disk_guard.py
-
-# 社区内容生成
-python src/community/content_generator.py
+# 测试盘前分析（5只股票示例）
+cd /root/.openclaw/workspace/showcase
+python3 -c "
+import sys; sys.path.insert(0, '/root/.openclaw/workspace')
+from showcase.src.financial.launcher import get_launcher
+launcher = get_launcher()
+launcher.stock_pool = launcher.stock_pool[:5]  # 只跑前5只
+print(launcher.cmd_premarket())
+"
 ```
 
----
+**输出示例**（2026-06-27 周六）：
+- 大盘：上证指数 4027点，跌2.26%，情绪恐慌，建议轻仓（3成以内）
+- 茅台：评分1.9/100（D级），MACD死叉，RSI 31.83，建议回避
+- 宁德时代：评分2.5/100（D级），趋势空头排列
 
-## 📂 仓库结构
+### 数据源状态
 
-```
-src/
-├── agent-orchestration/
-│   └── scheduler.py              # 事件路由+状态机+插件化
-├── community/
-│   ├── content_generator.py      # 动态素材+质量门+A/B实验
-│   └── meyo_post_daily.py        # 觅游社区自动发帖（素材→生成→发布）
-├── self-improving/
-│   ├── instinct_system.py        # 纠正检测+模式聚类+规则升级
-│   └── detect_correction.py      # 25+关键词纠正检测器
-├── infrastructure/
-│   └── disk_guard.py             # 磁盘告警+自动清理+session归档
-├── rag-knowledge-base/
-│   └── build_index.py            # 本地Embedding+FAISS
-├── dataset-cleaning/
-│   └── pipeline.py               # 4阶段流水线+质量评分
-├── model-evaluation/
-│   └── framework.py              # 4维评测+幻觉检测
-└── financial/
-    ├── signal_pipeline.py      # 实时行情获取 + 异常检测引擎（个股+大盘）
-    ├── launcher.py             # 一键启动器（realtime/summary/warmup）
-    ├── wechat_pusher.py        # 待推送消息 → 微信告警
-    ├── setup_cron.sh           # 定时任务配置（交易时段每5分钟）
-    └── news_analyzer.py        # 双轨制新闻分析（预留接口）
+| 数据类型 | 来源 | 状态 | 备注 |
+|----------|------|------|------|
+| 实时价格 | 新浪API | ✅ 可用 | 需Referer头 |
+| 历史K线 | akshare | ✅ 可用 | 前复权 |
+| MA/MACD/RSI | 本地计算 | ✅ 可用 | 基于历史K线 |
+| 换手率 | ❌ 缺失 | 新浪不返回 | 待补充 |
+| PE/PB/ROE | ❌ 缺失 | 待接入akshare | 待补充 |
+| 营收/利润增速 | ❌ 缺失 | 需财报数据 | 待补充 |
+| 大盘AI摘要 | 规则化 | ✅ 可用 | AI key 401，已fallback |
 
-docs/
-└── architecture.md               # 架构设计文档（含mermaid图）
+### 已知问题
 
-projects/
-├── 02-financial-ai/
-│   └── README.md                 # 金融量化系统详细文档
-└── 03-community-agent/
-    └── README.md                 # 社区Agent详细文档
+1. **LLM API 401**: Kimi key 无效，大盘摘要使用规则化生成（基于涨跌幅）
+2. **基本面数据缺失**: PE/PB/ROE/增速均为空，导致评分器"估值"和"基本面"维度得分偏低
+3. **持仓为0**: portfolio_events表为空，需录入历史交易
 
-config/
-└── agent-system.json             # 调度器配置
-```
+### 下一步建议
 
----
+**P0（立刻做）**：
+- 录入聚宽模拟盘历史交易 → 持仓快照才能正确计算
 
-> **不是研究AI，是用AI打硬仗。**
+**P1（近期）**：
+- 补充akshare基本面接口（PE/PB/ROE）
+- 修复LLM API key或切换到DeepSeek
+- 接入换手率数据
+
+**P2（优化）**：
+- 企业微信推送集成
+- 盘后复盘自动验证信号
+- 新闻舆情接入评分

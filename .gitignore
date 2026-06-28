@@ -1,0 +1,21 @@
+__pycache__/
+
+# 凭证/密钥（绝对不能进Git）
+.env
+.env.*
+*.pem
+*.key
+.credentials.json
+
+# 数据库/数据（本地生成，可能含敏感信息）
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 运行时文件
+logs/
+*.log
+tmp/
+

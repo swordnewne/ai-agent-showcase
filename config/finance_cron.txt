@@ -1,0 +1,34 @@
+# 金融投资系统 — 定时任务统一配置
+# 安装: crontab /root/.openclaw/workspace/showcase/config/finance_cron.txt
+#
+# 任务清单:
+# 1. 09:30  金融信号预警系统启动（盘中监控）
+# 2. 15:05  聚宽模拟盘数据同步（持仓+交易日志）
+# 3. 15:10  实时市值计算（akshare）
+# 4. 15:15  信号 vs 实盘复盘对比
+# 5. 20:15  AI情报雷达采集
+# 6. 22:00  AI情报雷达报告审查
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# ── 盘中监控 ──
+# stock-assistant 每5分钟运行一次（由外部调度器触发，不在cron中）
+# monitor.py 触发告警时会自动写入 decision_signals
+
+# ── 盘后同步（工作日 15:05-15:15）──
+# 1. 抓取聚宽持仓和交易日志
+5 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && JQ_BACKTEST_ID="054e0e6887a2e77a64468e68d8419535" python3 fetch_joinquant_full.py >> /tmp/jq_sync.log 2>&1
+
+# 2. 计算实时市值（akshare）
+10 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && python3 update_portfolio_value_akshare.py >> /tmp/jq_value.log 2>&1
+
+# 3. 信号 vs 实盘复盘对比
+15 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && python3 daily_signal_review.py >> /tmp/jq_review.log 2>&1
+
+# ── AI情报雷达 ──
+# 采集: 20:15 每天
+15 20 * * * cd /root/.openclaw/workspace/skills/ai-intelligence-radar && bash run_radar.sh >> /tmp/radar.log 2>&1
+
+# 审查: 22:00 每天（采集完成后）
+0 22 * * * cd /root/.openclaw/workspace/skills/ai-intelligence-radar && python3 review.py >> /tmp/radar_review.log 2>&1
