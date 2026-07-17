@@ -35,7 +35,7 @@ class SignalTracker:
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
             db_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "data", "finance.db"
+                os.path.dirname(__file__), "..", "..", "..", "data", "finance.db"
             )
             db_path = os.path.abspath(db_path)
         self.db_path = db_path
@@ -107,7 +107,7 @@ class SignalTracker:
         conn = self._get_conn()
         try:
             conn.execute(
-                """INSERT INTO decision_signals
+                """INSERT INTO sig_decision_signals
                    (signal_id, stock_code, stock_name, signal_type, confidence,
                     reason, score_total, score_breakdown, kelly_fraction,
                     target_price, stop_loss, suggested_shares,
@@ -298,7 +298,7 @@ class SignalTracker:
         conn = self._get_conn()
         try:
             conn.execute(
-                """UPDATE decision_signals
+                """UPDATE sig_decision_signals
                    SET outcome = ?, outcome_return = ?, verified_at = ?
                    WHERE signal_id = ?""",
                 (
@@ -328,7 +328,7 @@ class SignalTracker:
                           kelly_fraction, target_price, stop_loss,
                           suggested_shares, market_context, created_at,
                           outcome, outcome_return, verified_at, verified_days
-                   FROM decision_signals WHERE signal_id = ?""",
+                   FROM sig_decision_signals WHERE signal_id = ?""",
                 (signal_id,)
             )
             row = cursor.fetchone()
@@ -356,7 +356,7 @@ class SignalTracker:
             cursor = conn.execute(
                 """SELECT signal_id, stock_code, stock_name, signal_type,
                           target_price, stop_loss, created_at, verified_days
-                   FROM decision_signals
+                   FROM sig_decision_signals
                    WHERE outcome IS NULL
                      AND date(created_at, '+' || verified_days || ' days') <= date('now')
                    ORDER BY created_at LIMIT ?""",
@@ -377,7 +377,7 @@ class SignalTracker:
             sql = ("SELECT signal_id, stock_code, stock_name, signal_type, "
                    "confidence, score_total, kelly_fraction, target_price, "
                    "stop_loss, outcome, outcome_return, created_at "
-                   "FROM decision_signals WHERE created_at >= ?")
+                   "FROM sig_decision_signals WHERE created_at >= ?")
             params = [cutoff]
             
             if stock_code:
@@ -426,7 +426,7 @@ class SignalTracker:
                     SUM(CASE WHEN outcome = 'hit_sl' THEN 1 ELSE 0 END) as sl_count,
                     SUM(CASE WHEN outcome = 'expired' THEN 1 ELSE 0 END) as expired_count,
                     AVG(outcome_return) as avg_return
-                   FROM decision_signals
+                   FROM sig_decision_signals
                    WHERE created_at >= ?""",
                 (cutoff,)
             )
@@ -439,7 +439,7 @@ class SignalTracker:
                     COUNT(outcome) as verified,
                     SUM(CASE WHEN outcome = 'hit_tp' THEN 1 ELSE 0 END) as tp,
                     AVG(outcome_return) as avg_ret
-                   FROM decision_signals
+                   FROM sig_decision_signals
                    WHERE created_at >= ?
                    GROUP BY signal_type""",
                 (cutoff,)

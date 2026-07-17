@@ -24,7 +24,10 @@ except ImportError:
     print("  playwright install chromium")
     sys.exit(1)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "finance.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
 
 def get_credentials():
@@ -130,7 +133,7 @@ def find_slider_gap(page):
                     captcha_element = el
                     print(f"  找到验证码元素: {sel}")
                     break
-            except:
+            except Exception:
                 continue
         
         if captcha_element:
@@ -184,7 +187,7 @@ def solve_captcha_advanced(page):
                     slider = el
                     print(f"  找到滑块: {sel}")
                     break
-            except:
+            except Exception:
                 continue
         
         if not slider:
@@ -209,7 +212,7 @@ def solve_captcha_advanced(page):
                         if not page.query_selector(sel) or not page.query_selector(sel).is_visible():
                             print("  验证码已通过！")
                             return True
-                    except:
+                    except Exception:
                         continue
                 
                 # 检查是否出现错误提示
@@ -247,7 +250,7 @@ def solve_captcha_advanced(page):
                     if not page.query_selector(sel) or not page.query_selector(sel).is_visible():
                         print("  简单拖动验证通过！")
                         return True
-                except:
+                except Exception:
                     continue
         
         return False
@@ -283,7 +286,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
             try:
                 page.click("input[type='checkbox']")
                 print("  勾选协议")
-            except:
+            except Exception:
                 pass
             
             # 3. 点击登录（可能触发验证码）
@@ -300,7 +303,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
                     try:
                         page.click("button:has-text('登 录')")
                         page.wait_for_timeout(3000)
-                    except:
+                    except Exception:
                         pass
             
             # 5. 检查登录结果
@@ -311,7 +314,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
                         login_success = True
                         print(f"  登录成功: {sel}")
                         break
-                except:
+                except Exception:
                     pass
             
             if not login_success:
@@ -328,6 +331,16 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
                 wait_until="networkidle", timeout=30000
             )
             page.wait_for_timeout(3000)
+            
+            # 6.5 保存Cookie供后续同步使用
+            try:
+                cookies = context.cookies()
+                cookie_file = os.path.expanduser("~/.jq_cookie.json")
+                with open(cookie_file, "w", encoding="utf-8") as f:
+                    json.dump(cookies, f, ensure_ascii=False, indent=2)
+                print(f"✅ Cookie已保存到 {cookie_file}")
+            except Exception as e:
+                print(f"  Cookie保存警告: {e}")
             
             html = page.content()
             with open("/tmp/jq_page.html", "w", encoding="utf-8") as f:
@@ -381,7 +394,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
                                 page.click(sel)
                                 print(f"  点击日志tab: {sel}")
                                 break
-                        except:
+                        except Exception:
                             pass
                     
                     for i in range(15):
@@ -487,7 +500,7 @@ def main():
                     continue
                 cost = float(h.get("cost", 0)) or 100.0
                 cursor.execute("""
-                    INSERT OR REPLACE INTO portfolio_events
+                    INSERT OR REPLACE INTO sig_portfolio_events
                     (event_type, event_date, symbol, side, quantity, price, note)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, ("trade", datetime.now().strftime("%Y-%m-%d"), code, "buy", qty, cost, h.get("name", "")))

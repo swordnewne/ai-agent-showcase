@@ -17,8 +17,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # monitor.py 触发告警时会自动写入 decision_signals
 
 # ── 盘后同步（工作日 15:05-15:15）──
-# 1. 抓取聚宽持仓和交易日志
-5 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && JQ_BACKTEST_ID="054e0e6887a2e77a64468e68d8419535" python3 fetch_joinquant_full.py >> /tmp/jq_sync.log 2>&1
+# 1. 确保 Cookie 有效（guard 会自动重新登录）
+0 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && python3 jq_login_guard.py >> /tmp/jq_guard.log 2>&1
+
+# 2. 抓取聚宽持仓和交易日志
+5 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && JQ_BACKTEST_ID="d8d7a951ece4a7bd995bf9ee62db0273" python3 fetch_joinquant_full.py >> /tmp/jq_sync.log 2>&1
 
 # 2. 计算实时市值（akshare）
 10 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && python3 update_portfolio_value_akshare.py >> /tmp/jq_value.log 2>&1

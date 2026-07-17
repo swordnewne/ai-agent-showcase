@@ -13,8 +13,14 @@ import json
 import re
 from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'finance.db')
-PRICE_CACHE = os.path.join(os.path.dirname(__file__), '..', 'data', 'prices.csv')
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
+PRICE_CACHE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "prices.csv"
+)
 
 NAME_MAP = {
     '002008.SZ': '大族激光', '002475.SZ': '立讯精密', '159915.SZ': '创业板ETF',
@@ -57,7 +63,7 @@ def read_prices():
                 if code and close:
                     try:
                         prices[code] = float(close)
-                    except:
+                    except Exception:
                         pass
     except Exception as e:
         print(f"读取价格缓存失败: {e}")
@@ -69,7 +75,7 @@ def get_positions(conn):
     cursor = conn.cursor()
     cursor.execute('''
         SELECT event_date, symbol, quantity, price 
-        FROM portfolio_events 
+        FROM sig_portfolio_events 
         WHERE event_type = 'position'
         ORDER BY event_date DESC, symbol
     ''')

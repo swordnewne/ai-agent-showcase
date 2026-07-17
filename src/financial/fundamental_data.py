@@ -142,7 +142,7 @@ class FundamentalDataProvider:
         try:
             float(s)
             return True
-        except:
+        except Exception:
             return False
 
 

@@ -17,8 +17,36 @@ import sqlite3
 import sys
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "finance.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
+
+import requests
+
+def _load_cookies_for_api():
+    """加载Cookie用于API请求（requests格式）"""
+    cookie_file = os.path.expanduser("~/.jq_cookie.json")
+    if os.path.exists(cookie_file):
+        try:
+            with open(cookie_file, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            result = {c["name"]: c["value"] for c in cookies if "joinquant.com" in c.get("domain", "")}
+            if result:
+                return result
+        except Exception as e:
+            print(f"读取Cookie文件失败: {e}")
+    print("⚠️ Cookie文件不存在，请先运行 jq_login_guard.py")
+    return {}
+
+COOKIES = _load_cookies_for_api()
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "https://www.joinquant.com/algorithm/live/index",
+}
 
 def get_credentials():
     """获取聚宽账号密码"""
@@ -84,7 +112,7 @@ def login_joinquant(username: str, password: str, fetch_logs: bool = False) -> d
             try:
                 page.click("input[type='checkbox']")
                 print("  勾选协议")
-            except:
+            except Exception:
                 pass
             
             # 点击登录
@@ -99,7 +127,7 @@ def login_joinquant(username: str, password: str, fetch_logs: bool = False) -> d
                         login_success = True
                         print(f"  登录成功指示器: {sel}")
                         break
-                except:
+                except Exception:
                     pass
             
             if not login_success:
@@ -110,7 +138,7 @@ def login_joinquant(username: str, password: str, fetch_logs: bool = False) -> d
             print("登录成功！")
             
             # 3. 访问模拟交易页面
-            backtest_id = os.environ.get("JQ_BACKTEST_ID", "")
+            backtest_id = os.environ.get("JQ_BACKTEST_ID", "d8d7a951ece4a7bd995bf9ee62db0273")
             if not backtest_id:
                 print("错误：缺少 JQ_BACKTEST_ID")
                 return None
@@ -224,7 +252,7 @@ def login_joinquant(username: str, password: str, fetch_logs: bool = False) -> d
                                 page.click(sel)
                                 print(f"  点击日志tab: {sel}")
                                 break
-                        except:
+                        except Exception:
                             pass
                     
                     # 等待日志加载（最长15秒）
@@ -354,7 +382,7 @@ def save_to_db(data: dict):
                 cost = 100.0
             
             cursor.execute("""
-                INSERT OR REPLACE INTO portfolio_events
+                INSERT OR REPLACE INTO sig_portfolio_events
                 (event_type, event_date, symbol, side, quantity, price, note)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -402,7 +430,7 @@ def save_to_db(data: dict):
             trade_date = trade_date.replace("/", "-").replace(".", "-")
             
             cursor.execute("""
-                INSERT OR REPLACE INTO portfolio_events
+                INSERT OR REPLACE INTO sig_portfolio_events
                 (event_type, event_date, symbol, side, quantity, price, note)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (

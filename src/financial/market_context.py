@@ -35,7 +35,7 @@ class MarketContextService:
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
             db_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "data", "finance.db"
+                os.path.dirname(__file__), "..", "..", "..", "data", "finance.db"
             )
             db_path = os.path.abspath(db_path)
         self.db_path = db_path
@@ -105,7 +105,7 @@ class MarketContextService:
         try:
             cursor = conn.execute(
                 "SELECT summary, risk_tags, position_cap, sentiment_score, "
-                "sh_index_close, sh_index_change FROM market_context WHERE trade_date = ?",
+                "sh_index_close, sh_index_change FROM sig_market_context WHERE trade_date = ?",
                 (ctx_date.isoformat(),)
             )
             row = cursor.fetchone()
@@ -293,7 +293,7 @@ class MarketContextService:
         conn = self._get_conn()
         try:
             conn.execute(
-                """INSERT OR REPLACE INTO market_context 
+                """INSERT OR REPLACE INTO sig_market_context 
                    (trade_date, summary, risk_tags, position_cap, sentiment_score,
                     sh_index_close, sh_index_change, source)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",

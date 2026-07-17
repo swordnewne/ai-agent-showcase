@@ -1,0 +1,6 @@
+# 聚宽模拟盘 每日自动同步
+# 1. 15:15 抓取聚宽持仓和交易日志（工作日）- 延后10分钟避开API高峰
+15 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && JQ_BACKTEST_ID="d8d7a951ece4a7bd995bf9ee62db0273" python3 fetch_joinquant_full.py >> /tmp/jq_sync.log 2>&1
+
+# 2. 15:20 获取实时价格并计算市值（工作日）
+20 15 * * 1-5 cd /root/.openclaw/workspace/showcase/scripts && python3 update_portfolio_value_akshare.py >> /tmp/jq_value.log 2>&1

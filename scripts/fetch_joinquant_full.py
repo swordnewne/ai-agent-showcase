@@ -20,16 +20,29 @@ except ImportError:
     print("  pip3 install requests")
     sys.exit(1)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "finance.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
-COOKIES = {
-    "uid": "wKgyrWohTYl46gW0mPsjAg==",
-    "token": "4534895bbc416603f7aa6bf5c6d96fc4e3b11b26",
-    "PHPSESSID": "tb0o5l0ldkjhkuoa7t07hc8t70",
-    "tips": "1",
-    "getStrategy": "1",
-    "isFirst": "0",
-}
+def _load_cookies():
+    """加载Cookie：优先从文件读取"""
+    cookie_file = os.path.expanduser("~/.jq_cookie.json")
+    if os.path.exists(cookie_file):
+        try:
+            with open(cookie_file, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            # Playwright格式 -> requests格式
+            result = {c["name"]: c["value"] for c in cookies if c.get("domain", "").endswith("joinquant.com")}
+            if result:
+                return result
+        except Exception as e:
+            print(f"读取Cookie文件失败: {e}")
+    
+    print("❌ Cookie文件不存在，请先运行 jq_login_guard.py")
+    return {}
+
+COOKIES = _load_cookies()
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -42,7 +55,21 @@ def fetch_api(backtest_id, data_type):
     """获取API数据"""
     url = f"https://www.joinquant.com/algorithm/backtest/export?type={data_type}&backtestId={backtest_id}"
     
-    resp = requests.get(url, headers=HEADERS, cookies=COOKIES, timeout=30)
+    # 增加超时和重试
+    retries = 3
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=HEADERS, cookies=COOKIES, timeout=(10, 60))
+            break
+        except Exception as e:
+            if attempt < retries - 1:
+                import time
+                wait = 2 ** attempt
+                print(f"请求超时，{wait}s 后重试 ({attempt + 1}/{retries})")
+                time.sleep(wait)
+            else:
+                print(f"请求失败: {e}")
+                return None
     
     if resp.status_code != 200:
         print(f"请求失败: {resp.status_code}")
@@ -52,7 +79,7 @@ def fetch_api(backtest_id, data_type):
     for encoding in ["gbk", "gb2312", "utf-8", "latin-1"]:
         try:
             return resp.content.decode(encoding)
-        except:
+        except Exception:
             continue
     
     return None
@@ -146,7 +173,7 @@ def parse_positions(csv_text):
             cost_str = row.get('开仓均价', '')
             try:
                 cost = float(str(cost_str).replace(',', ''))
-            except:
+            except Exception:
                 cost = 0
             
             positions.append({
@@ -172,7 +199,7 @@ def save_to_db(trades, positions):
     
     # 创建表（如果不存在）
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS portfolio_events (
+        CREATE TABLE IF NOT EXISTS sig_portfolio_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
             event_date TEXT NOT NULL,
@@ -193,14 +220,14 @@ def save_to_db(trades, positions):
             symbol = f"{t['code']}.SH" if t['exchange'] == 'XSHG' else f"{t['code']}.SZ"
             # 检查是否已存在
             cursor.execute("""
-                SELECT id FROM portfolio_events 
+                SELECT id FROM sig_portfolio_events 
                 WHERE event_type = 'trade' AND event_date = ? AND symbol = ? AND side = ? AND quantity = ?
             """, (t['date'], symbol, t['side'], t['quantity']))
             if cursor.fetchone():
                 continue  # 已存在，跳过
             
             cursor.execute("""
-                INSERT INTO portfolio_events
+                INSERT INTO sig_portfolio_events
                 (event_type, event_date, symbol, side, quantity, price, note)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, ("trade", t['date'], symbol, t['side'], t['quantity'], 0, f"{t['time']} {t['raw'][:80]}"))
@@ -216,14 +243,14 @@ def save_to_db(trades, positions):
                 symbol = f"{p['code']}.SH" if p['exchange'] == 'XSHG' else f"{p['code']}.SZ"
                 # 先检查是否已存在
                 cursor.execute("""
-                    SELECT id FROM portfolio_events 
+                    SELECT id FROM sig_portfolio_events 
                     WHERE event_type = 'position' AND event_date = ? AND symbol = ?
                 """, (p['date'], symbol))
                 if cursor.fetchone():
                     continue  # 已存在，跳过
                 
                 cursor.execute("""
-                    INSERT INTO portfolio_events
+                    INSERT INTO sig_portfolio_events
                     (event_type, event_date, symbol, side, quantity, price, note)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, ("position", p['date'], symbol, "hold", p['quantity'], p['cost'], f"持仓快照 {p['date']}"))
@@ -238,7 +265,7 @@ def save_to_db(trades, positions):
 
 
 def main():
-    backtest_id = os.environ.get("JQ_BACKTEST_ID", "054e0e6887a2e77a64468e68d8419535")
+    backtest_id = os.environ.get("JQ_BACKTEST_ID", "d8d7a951ece4a7bd995bf9ee62db0273")
     
     print(f"=== 聚宽数据抓取 ===")
     print(f"Backtest ID: {backtest_id}\n")

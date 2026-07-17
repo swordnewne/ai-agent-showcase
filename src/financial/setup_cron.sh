@@ -14,7 +14,7 @@ cat >> /tmp/crontab_clean << 'EOF'
 
 # ====== 金融信号预警系统 (signal_pipeline) ======
 # 交易时段每5分钟: 实时行情异动检测（涨幅≥5% + 成交额≥10亿 / 涨跌停 / 大盘异动±2%）
-*/5 9-15 * * 1-5 cd /root/.openclaw/workspace/showcase/src/financial && python3 signal_pipeline.py --mode realtime >> /tmp/finance_signal.log 2>&1
+*/5 9-15 * * 1-5 python3 /root/.openclaw/workspace/showcase/src/financial/signal_pipeline.py --mode realtime >> /tmp/finance_signal.log 2>&1
 # 收盘后15:05: 日终总结（大盘 + 涨跌停 + 涨跌幅TOP5）
 5 15 * * 1-5 cd /root/.openclaw/workspace/showcase/src/financial && python3 signal_pipeline.py --mode summary >> /tmp/finance_signal.log 2>&1
 # 盘前8:30: 系统预热（初始化缓存）

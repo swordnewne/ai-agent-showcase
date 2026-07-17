@@ -17,7 +17,10 @@ except ImportError:
     print("错误：未安装 Playwright")
     sys.exit(1)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "finance.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
 
 def get_credentials():
@@ -85,7 +88,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
             try:
                 page.click("input[type='checkbox']")
                 print("  勾选协议")
-            except:
+            except Exception:
                 pass
             
             # 3. 点击登录（可能触发验证码）
@@ -103,7 +106,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
                     try:
                         page.click("button:has-text('登 录')")
                         page.wait_for_timeout(3000)
-                    except:
+                    except Exception:
                         pass
             
             # 5. 检查登录结果
@@ -114,7 +117,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
                         login_success = True
                         print(f"  登录成功: {sel}")
                         break
-                except:
+                except Exception:
                     pass
             
             if not login_success:
@@ -184,7 +187,7 @@ def login_and_fetch(username, password, backtest_id, fetch_logs=False):
                                 page.click(sel)
                                 print(f"  点击日志tab: {sel}")
                                 break
-                        except:
+                        except Exception:
                             pass
                     
                     # 等待加载完成
@@ -266,7 +269,7 @@ def main():
     if not username:
         return 1
     
-    backtest_id = os.environ.get("JQ_BACKTEST_ID", "")
+    backtest_id = os.environ.get("JQ_BACKTEST_ID", "d8d7a951ece4a7bd995bf9ee62db0273")
     data = login_and_fetch(username, password, backtest_id, fetch_logs=args.fetch_logs)
     if not data:
         return 1
@@ -292,7 +295,7 @@ def main():
                     continue
                 cost = float(h.get("cost", 0)) or 100.0
                 cursor.execute("""
-                    INSERT OR REPLACE INTO portfolio_events
+                    INSERT OR REPLACE INTO sig_portfolio_events
                     (event_type, event_date, symbol, side, quantity, price, note)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, ("trade", datetime.now().strftime("%Y-%m-%d"), code, "buy", qty, cost, h.get("name", "")))

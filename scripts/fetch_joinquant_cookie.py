@@ -16,17 +16,37 @@ except ImportError:
     print("错误：未安装 Playwright")
     sys.exit(1)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "finance.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
-# Cookie数据（从浏览器导出）
-COOKIES = [
-    {"name": "uid", "value": "wKgyrWohTYl46gW0mPsjAg==", "domain": "www.joinquant.com", "path": "/"},
-    {"name": "token", "value": "4534895bbc416603f7aa6bf5c6d96fc4e3b11b26", "domain": "www.joinquant.com", "path": "/"},
-    {"name": "tips", "value": "1", "domain": "www.joinquant.com", "path": "/"},
-    {"name": "isFirst", "value": "0", "domain": "www.joinquant.com", "path": "/algorithm/index"},
-    {"name": "getStrategy", "value": "1", "domain": "www.joinquant.com", "path": "/"},
-    {"name": "PHPSESSID", "value": "tb0o5l0ldkjhkuoa7t07hc8t70", "domain": "www.joinquant.com", "path": "/"},
-]
+def _load_cookies_for_playwright():
+    """加载Cookie：优先从文件读取，否则返回硬编码"""
+    cookie_file = os.path.expanduser("~/.jq_cookie.json")
+    if os.path.exists(cookie_file):
+        try:
+            with open(cookie_file, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            # Playwright 格式需要 domain/path 等字段
+            result = [c for c in cookies if "joinquant.com" in c.get("domain", "")]
+            if result:
+                print(f"✅ 从 {cookie_file} 加载了 {len(result)} 个Cookie")
+                return result
+        except Exception as e:
+            print(f"读取Cookie文件失败: {e}")
+    
+    print("⚠️ 使用硬编码Cookie（可能已过期）")
+    return [
+        {"name": "uid", "value": "wKgyrWohTYl46gW0mPsjAg==", "domain": "www.joinquant.com", "path": "/"},
+        {"name": "token", "value": "4534895bbc416603f7aa6bf5c6d96fc4e3b11b26", "domain": "www.joinquant.com", "path": "/"},
+        {"name": "tips", "value": "1", "domain": "www.joinquant.com", "path": "/"},
+        {"name": "isFirst", "value": "0", "domain": "www.joinquant.com", "path": "/algorithm/index"},
+        {"name": "getStrategy", "value": "1", "domain": "www.joinquant.com", "path": "/"},
+        {"name": "PHPSESSID", "value": "tb0o5l0ldkjhkuoa7t07hc8t70", "domain": "www.joinquant.com", "path": "/"},
+    ]
+
+COOKIES = _load_cookies_for_playwright()
 
 
 def fetch_with_cookies(backtest_id, fetch_logs=False):
@@ -111,7 +131,7 @@ def fetch_with_cookies(backtest_id, fetch_logs=False):
                             page.click(sel)
                             print(f"  点击日志tab: {sel}")
                             break
-                    except:
+                    except Exception:
                         pass
                 
                 for i in range(15):
@@ -175,7 +195,7 @@ def fetch_with_cookies(backtest_id, fetch_logs=False):
 
 
 def main():
-    backtest_id = os.environ.get("JQ_BACKTEST_ID", "054e0e6887a2e77a64468e68d8419535")
+    backtest_id = os.environ.get("JQ_BACKTEST_ID", "d8d7a951ece4a7bd995bf9ee62db0273")
     
     data = fetch_with_cookies(backtest_id, fetch_logs=True)
     if not data:
@@ -203,7 +223,7 @@ def main():
                 continue
             cost = float(h.get("cost", 0)) or 100.0
             cursor.execute("""
-                INSERT OR REPLACE INTO portfolio_events
+                INSERT OR REPLACE INTO sig_portfolio_events
                 (event_type, event_date, symbol, side, quantity, price, note)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, ("trade", datetime.now().strftime("%Y-%m-%d"), code, "buy", qty, cost, h.get("name", "")))

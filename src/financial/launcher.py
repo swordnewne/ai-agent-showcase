@@ -42,7 +42,7 @@ class TradingSystemLauncher:
                  stock_pool_path: Optional[str] = None):
         if db_path is None:
             db_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "data", "finance.db"
+                os.path.dirname(__file__), "..", "..", "..", "data", "finance.db"
             )
             db_path = os.path.abspath(db_path)
         self.db_path = db_path

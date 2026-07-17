@@ -17,17 +17,27 @@ except ImportError:
     print("  pip3 install requests")
     sys.exit(1)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "finance.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
-# Cookie数据
-COOKIES = {
-    "uid": "wKgyrWohTYl46gW0mPsjAg==",
-    "token": "4534895bbc416603f7aa6bf5c6d96fc4e3b11b26",
-    "PHPSESSID": "tb0o5l0ldkjhkuoa7t07hc8t70",
-    "tips": "1",
-    "getStrategy": "1",
-    "isFirst": "0",
-}
+def _load_cookies():
+    """加载Cookie：优先从文件读取"""
+    cookie_file = os.path.expanduser("~/.jq_cookie.json")
+    if os.path.exists(cookie_file):
+        try:
+            with open(cookie_file, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            result = {c["name"]: c["value"] for c in cookies if "joinquant.com" in c.get("domain", "")}
+            if result:
+                return result
+        except Exception as e:
+            print(f"读取Cookie文件失败: {e}")
+    print("⚠️ Cookie文件不存在，请先运行 jq_login_guard.py")
+    return {}
+
+COOKIES = _load_cookies()
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -53,7 +63,7 @@ def fetch_logs(backtest_id):
             content = resp.content.decode(encoding)
             print(f"使用编码: {encoding}")
             break
-        except:
+        except Exception:
             continue
     
     if not content:
@@ -138,7 +148,7 @@ def parse_trades_from_logs(log_text):
 
 
 def main():
-    backtest_id = os.environ.get("JQ_BACKTEST_ID", "054e0e6887a2e77a64468e68d8419535")
+    backtest_id = os.environ.get("JQ_BACKTEST_ID", "d8d7a951ece4a7bd995bf9ee62db0273")
     
     print(f"正在获取日志: {backtest_id}")
     log_text = fetch_logs(backtest_id)
@@ -182,7 +192,7 @@ def main():
                 qty = abs(t['delta'])
                 
                 cursor.execute("""
-                    INSERT INTO portfolio_events
+                    INSERT INTO sig_portfolio_events
                     (event_type, event_date, symbol, side, quantity, price, note)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, ("trade", t['date'], symbol, side, qty, 0, t['raw'][:100]))

@@ -25,7 +25,10 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 # 数据库路径
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "finance.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
 
 def get_db():
@@ -95,11 +98,11 @@ def parse_joinquant_csv(filepath: str) -> List[Dict]:
             try:
                 dt = datetime.strptime(event["trade_time"], "%Y-%m-%d %H:%M:%S")
                 event["trade_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
-            except:
+            except Exception:
                 try:
                     dt = datetime.strptime(event["trade_time"], "%Y-%m-%d")
                     event["trade_time"] = dt.strftime("%Y-%m-%d 14:30:00")
-                except:
+                except Exception:
                     event["trade_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # 标准化symbol
@@ -181,7 +184,7 @@ def import_events(events: List[Dict], dry_run: bool = False):
     for e in events:
         try:
             cursor.execute("""
-                INSERT INTO portfolio_events
+                INSERT INTO sig_portfolio_events
                 (event_type, event_date, symbol, side, quantity, price, note)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (

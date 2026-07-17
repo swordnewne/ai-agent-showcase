@@ -37,7 +37,7 @@ class PortfolioTracker:
     def __init__(self, db_path: Optional[str] = None, account_id: str = "default"):
         if db_path is None:
             db_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "data", "finance.db"
+                os.path.dirname(__file__), "..", "..", "..", "data", "finance.db"
             )
             db_path = os.path.abspath(db_path)
         self.db_path = db_path
@@ -439,7 +439,7 @@ class PortfolioTracker:
         conn = self._get_conn()
         try:
             conn.execute(
-                """INSERT OR REPLACE INTO portfolio_snapshots
+                """INSERT OR REPLACE INTO sig_portfolio_snapshots
                    (snapshot_date, account_id, total_equity, total_cash,
                     total_market_value, unrealized_pnl, realized_pnl,
                     fee_total, tax_total, positions_json)
@@ -500,7 +500,7 @@ class PortfolioTracker:
                 """SELECT snapshot_date, total_equity, total_cash,
                           total_market_value, unrealized_pnl, realized_pnl,
                           fee_total, tax_total, positions_json
-                   FROM portfolio_snapshots
+                   FROM sig_portfolio_snapshots
                    WHERE account_id = ?
                    ORDER BY snapshot_date DESC LIMIT 1""",
                 (self.account_id,)

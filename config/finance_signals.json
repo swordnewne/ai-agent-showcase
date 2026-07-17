@@ -1,21 +1,38 @@
 {
-  "_comment": "金融信号预警系统 - 主配置",
-  "version": "0.1",
+  "_comment": "金融信号预警系统 - 主配置 v0.2",
+  "version": "0.2",
   "data_source": {
     "primary": "sina",
     "fallback": null,
     "sina_api": "https://hq.sinajs.cn/list={}",
     "sina_referer": "https://finance.sina.com.cn"
   },
-  "thresholds": {
-    "volume_ratio": 2.0,
-    "price_change_big": 5.0,
-    "turnover_min": 1000000000,
-    "index_change": 2.0,
-    "index_panic": 2.0,
-    "price_change_limit": 9.5,
-    "cooldown_seconds": 600
+  "monitors": {
+    "individual_stock": {
+      "enabled": false,
+      "_comment": "个股异动监控已关闭。开启需设 enabled=true 并调低阈值",
+      "thresholds": {
+        "price_change_big": 5.0,
+        "turnover_min": 100000000,
+        "volume_ratio": 2.0
+      }
+    },
+    "index": {
+      "enabled": true,
+      "thresholds": {
+        "change": 2.0,
+        "panic": 2.0
+      }
+    },
+    "limit_up_down": {
+      "enabled": true,
+      "thresholds": {
+        "limit_percent": 9.5
+      }
+    }
   },
+  "cooldown_seconds": 1200,
+  "cooldown_comment": "1200s > cron_interval(300s)*2 + buffer, 避免重复触发",
   "index_codes": {
     "sh000300": "沪深300",
     "sz399006": "创业板指",
@@ -29,6 +46,20 @@
     "max_attempts": 3,
     "base_delay": 1.0,
     "max_delay": 8.0
+  },
+  "thresholds": {
+    "volume_ratio": 2.0,
+    "price_change_big": 5.0,
+    "turnover_min": 100000000,
+    "index_change": 2.0,
+    "index_panic": 2.0,
+    "price_change_limit": 9.5,
+    "cooldown_seconds": 1200
+  },
+  "im_target": {
+    "channel": "kimi-claw",
+    "mode": "direct",
+    "_comment": "金融信号直接推送到当前 kimi-claw 对话"
   },
   "logging": {
     "level": "INFO",

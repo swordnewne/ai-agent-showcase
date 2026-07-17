@@ -24,7 +24,10 @@ except ImportError:
     print("安装: pip install akshare")
     sys.exit(1)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'finance.db')
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "finance.db"
+)
 
 NAME_MAP = {
     '002008.SZ': '大族激光', '002475.SZ': '立讯精密', '159915.SZ': '创业板ETF',
@@ -57,7 +60,7 @@ def get_positions(conn):
     cursor = conn.cursor()
     cursor.execute('''
         SELECT event_date, symbol, quantity, price 
-        FROM portfolio_events 
+        FROM sig_portfolio_events 
         WHERE event_type = 'position'
         ORDER BY event_date DESC, symbol
     ''')

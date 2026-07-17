@@ -11,13 +11,23 @@ import os
 import sys
 from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'finance.db')
+def _find_workspace() -> str:
+    """Find project root by looking for marker files"""
+    path = os.path.dirname(os.path.abspath(__file__))
+    while path != '/':
+        if os.path.exists(os.path.join(path, 'AGENTS.md')) or os.path.exists(os.path.join(path, 'SOUL.md')):
+            return path
+        path = os.path.dirname(path)
+    # Fallback: script-relative (3 levels up for scripts/ path)
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+DB_PATH = os.path.join(_find_workspace(), "data", "finance.db")
 
 
 def ensure_table(conn):
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS decision_signals (
+        CREATE TABLE IF NOT EXISTS sig_decision_signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             signal_id TEXT UNIQUE,
             stock_code TEXT NOT NULL,
@@ -63,7 +73,7 @@ def add_signal(date: str, code: str, side: str, price: float,
         name = name_map.get(code, code)
     
     cursor.execute('''
-        INSERT OR REPLACE INTO decision_signals
+        INSERT OR REPLACE INTO sig_decision_signals
         (signal_id, stock_code, stock_name, signal_type, target_price, 
          confidence, reason, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)

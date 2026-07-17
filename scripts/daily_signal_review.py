@@ -1,148 +1,48 @@
 #!/usr/bin/env python3
 """
-信号 vs 实盘 每日复盘系统（含虚拟收益计算）
-用法: python3 daily_signal_review.py [--date YYYY-MM-DD]
+信号质量每日复盘系统 v2.0
 
-流程:
-1. 读取当天信号 (decision_signals)
-2. 读取当天实盘 (portfolio_events trades + positions)
-3. 对比: 命中率、价格偏差、收益差异
-4. 虚拟收益: 信号建议价 → 次日收盘价 → 收益率
-5. 生成报告
+核心变化：不再做"信号 vs 交易"的强行匹配（两者是独立系统），
+改为评估信号本身的质量：信号触发后 N 日的实际涨跌是否符合信号方向。
+
+用法: python3 daily_signal_review.py [--date YYYY-MM-DD]
 """
 import sqlite3
 import json
 import os
 import sys
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'finance.db')
+def _find_workspace() -> str:
+    """Find project root by looking for marker files"""
+    path = os.path.dirname(os.path.abspath(__file__))
+    while path != '/':
+        if os.path.exists(os.path.join(path, 'AGENTS.md')) or os.path.exists(os.path.join(path, 'SOUL.md')):
+            return path
+        path = os.path.dirname(path)
+    # Fallback: script-relative (3 levels up for scripts/ path)
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-NAME_MAP = {
-    '002008.SZ': '大族激光', '002475.SZ': '立讯精密', '159915.SZ': '创业板ETF',
-    '300223.SZ': '北京君正', '300308.SZ': '中际旭创', '300433.SZ': '蓝思科技',
-    '300502.SZ': '新易盛', '300661.SZ': '圣邦股份', '510300.SH': '300ETF',
-    '510500.SH': '500ETF', '688256.SH': '寒武纪', '688390.SH': '固德威',
+DB_PATH = os.path.join(_find_workspace(), "data", "finance.db")
+
+# 2026 年中国法定节假日（需每年更新）
+HOLIDAYS = {
+    "2026-01-01",  # 元旦
+    "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-21", "2026-02-22", "2026-02-23",  # 春节
+    "2026-04-04", "2026-04-05", "2026-04-06",  # 清明
+    "2026-05-01", "2026-05-02", "2026-05-03",  # 劳动节
+    "2026-06-19", "2026-06-20", "2026-06-21",  # 端午节
+    "2026-09-25", "2026-09-26", "2026-09-27",  # 中秋节
+    "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07",  # 国庆
 }
 
-# akshare 缓存，避免重复查询
-_price_cache: Dict[str, Dict[str, float]] = {}
+# akshare 缓存
+_price_cache: Dict[str, float] = {}
 
 
-@dataclass
-class Signal:
-    date: str
-    symbol: str
-    side: str
-    signal_price: float
-    confidence: int
-    reason: str
-    score_total: int
-    kelly_fraction: float
-
-
-@dataclass
-class Trade:
-    date: str
-    symbol: str
-    side: str
-    quantity: float
-    price: float
-
-
-@dataclass
-class ComparisonResult:
-    symbol: str
-    name: str
-    signal_side: str
-    signal_price: float
-    has_trade: bool
-    trade_side: Optional[str]
-    trade_price: Optional[float]
-    trade_qty: Optional[float]
-    price_diff: Optional[float]
-    match: bool
-    pnl_signal_1d: Optional[float] = None   # 信号次日收益
-    pnl_signal_5d: Optional[float] = None   # 信号5日收益
-    pnl_actual_1d: Optional[float] = None   # 实盘次日收益
-    next_price: Optional[float] = None      # 次日收盘价
-
-
-def _strip_suffix(symbol: str) -> str:
-    """688256.SH → 688256"""
-    return symbol.split('.')[0]
-
-
-def _is_etf(symbol: str) -> bool:
-    """判断是否是ETF"""
-    return symbol.startswith('15') or symbol.startswith('51')
-
-
-def get_stock_close_price(symbol: str, date: str) -> Optional[float]:
-    """获取某只票某日的收盘价，优先缓存"""
-    cache_key = f"{symbol}:{date}"
-    if cache_key in _price_cache:
-        return _price_cache[cache_key]
-    
-    try:
-        import akshare as ak
-        code = _strip_suffix(symbol)
-        
-        if _is_etf(symbol):
-            df = ak.fund_etf_hist_em(symbol=code, period="daily",
-                                     start_date=date.replace('-', ''),
-                                     end_date=date.replace('-', ''),
-                                     adjust="qfq")
-        else:
-            df = ak.stock_zh_a_hist(symbol=code, period="daily",
-                                    start_date=date.replace('-', ''),
-                                    end_date=date.replace('-', ''),
-                                    adjust="qfq")
-        if df is not None and len(df) > 0:
-            price = float(df.iloc[0]['收盘'])
-            _price_cache[cache_key] = price
-            return price
-    except Exception as e:
-        pass
-    
-    return None
-
-
-def get_next_trading_date(date_str: str, days: int = 1) -> str:
-    """获取N个交易日后的日期（跳过周末）"""
-    d = datetime.strptime(date_str, '%Y-%m-%d')
-    count = 0
-    while count < days:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            count += 1
-    return d.strftime('%Y-%m-%d')
-
-
-def calculate_virtual_pnl(signal: Signal, hold_days: int = 1) -> Optional[float]:
-    """计算信号的虚拟收益
-    buy:  (next_close - signal_price) / signal_price * 100
-    sell: (signal_price - next_close) / signal_price * 100
-    """
-    if signal.signal_price <= 0:
-        return None
-    
-    next_date = get_next_trading_date(signal.date, hold_days)
-    next_close = get_stock_close_price(signal.symbol, next_date)
-    if next_close is None:
-        return None
-    
-    if signal.side == 'buy':
-        return (next_close - signal.signal_price) / signal.signal_price * 100
-    elif signal.side == 'sell':
-        return (signal.signal_price - next_close) / signal.signal_price * 100
-    else:
-        return None
-
-
-def normalize_symbol(code: str) -> str:
+def _normalize_code(code: str) -> str:
+    """统一代码格式：纯代码 → 带后缀"""
     code = str(code).strip()
     if '.' in code:
         return code
@@ -151,231 +51,299 @@ def normalize_symbol(code: str) -> str:
     return f'{code}.SZ'
 
 
-def get_signals(conn, date: str) -> List[Signal]:
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT created_at, stock_code, signal_type, target_price, 
-               confidence, reason, score_total, kelly_fraction
-        FROM decision_signals
+_spot_df = None  # 全局 spot 缓存，懒加载
+
+def _load_spot_cache():
+    """一次性加载全市场实时行情，用于获取当日收盘数据"""
+    global _spot_df
+    if _spot_df is None:
+        try:
+            import akshare as ak
+            _spot_df = ak.stock_zh_a_spot()
+        except Exception:
+            _spot_df = None
+    return _spot_df
+
+
+def get_stock_close_price(symbol: str, date: str) -> Optional[float]:
+    """获取某只票某日的收盘价（优先 akshare，失败返回 None）"""
+    cache_key = f"{symbol}:{date}"
+    if cache_key in _price_cache:
+        return _price_cache[cache_key]
+    
+    try:
+        import akshare as ak
+        code = symbol.split('.')[0]
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=date.replace('-', ''), end_date=date.replace('-', ''), adjust="qfq")
+        if not df.empty:
+            price = float(df.iloc[0]['收盘'])
+            _price_cache[cache_key] = price
+            return price
+    except Exception:
+        pass
+    
+    # fallback: 新浪接口 stock_zh_a_daily
+    try:
+        import akshare as ak
+        code = symbol.split('.')[0]
+        exchange = 'sh' if symbol.endswith('.SH') else 'sz'
+        sina_symbol = f"{exchange}{code}"
+        df = ak.stock_zh_a_daily(symbol=sina_symbol, start_date=date.replace('-', ''), end_date=date.replace('-', ''))
+        if not df.empty:
+            price = float(df.iloc[0]['close'])
+            _price_cache[cache_key] = price
+            return price
+    except Exception:
+        pass
+    
+    # fallback: 实时行情 spot（用于获取当日收盘数据，收盘后最新价≈收盘价）
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        if date == today:
+            spot_df = _load_spot_cache()
+            if spot_df is not None:
+                code = symbol.split('.')[0]
+                exchange = 'sh' if symbol.endswith('.SH') else 'sz'
+                spot_code = f"{exchange}{code}"
+                row = spot_df[spot_df['代码'] == spot_code]
+                if not row.empty:
+                    price = float(row.iloc[0]['最新价'])
+                    _price_cache[cache_key] = price
+                    return price
+    except Exception:
+        pass
+    
+    # 尝试从 finance.db 的 market_context 读取
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT close_price FROM market_context WHERE date = ? AND index_code = ?', (date, symbol))
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            _price_cache[cache_key] = row[0]
+            return row[0]
+    except Exception:
+        pass
+    
+    return None
+
+
+def get_next_trading_date(date_str: str, days: int) -> Optional[str]:
+    """获取 N 个交易日后的日期（跳过周末和法定节假日）"""
+    d = datetime.strptime(date_str, '%Y-%m-%d')
+    for _ in range(days):
+        d += timedelta(days=1)
+        while d.weekday() >= 5 or d.strftime('%Y-%m-%d') in HOLIDAYS:
+            d += timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
+def get_signals(conn, date: str) -> List[Tuple]:
+    """读取某天所有信号（去重：同一股票同一天同一方向只取最新）"""
+    c = conn.cursor()
+    c.execute('''
+        SELECT stock_code, signal_type, target_price, confidence, reason, created_at
+        FROM sig_decision_signals
         WHERE DATE(created_at) = ?
-        ORDER BY stock_code
+        ORDER BY stock_code, created_at DESC
     ''', (date,))
     
+    seen = set()
     signals = []
-    for row in cursor.fetchall():
-        created_at, code, side, price, conf, reason, score, kelly = row
-        symbol = normalize_symbol(code)
-        signals.append(Signal(
-            date=date, symbol=symbol, side=side or 'hold',
-            signal_price=price or 0, confidence=conf or 0,
-            reason=reason or '', score_total=score or 0,
-            kelly_fraction=kelly or 0
-        ))
+    for row in c.fetchall():
+        code, side, price, conf, reason, created = row
+        key = (code, side)
+        if key in seen:
+            continue
+        seen.add(key)
+        signals.append((code, side, price or 0, conf or 0, reason or '', created))
     return signals
 
 
-def get_trades(conn, date: str) -> List[Trade]:
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT event_date, symbol, side, quantity, price
-        FROM portfolio_events
-        WHERE event_type = 'trade' AND event_date = ?
-        ORDER BY symbol
-    ''', (date,))
+def evaluate_signal_quality(date: str) -> Dict:
+    """评估某天所有信号的质量"""
+    conn = sqlite3.connect(DB_PATH)
+    signals = get_signals(conn, date)
+    conn.close()
     
-    trades = []
-    for row in cursor.fetchall():
-        trades.append(Trade(
-            date=row[0], symbol=row[1], side=row[2] or 'hold',
-            quantity=row[3] or 0, price=row[4] or 0
-        ))
-    return trades
-
-
-def get_positions(conn, date: str) -> dict:
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT symbol, quantity, price
-        FROM portfolio_events
-        WHERE event_type = 'position' AND event_date = ?
-    ''', (date,))
-    return {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
-
-
-def compare_signals_trades(signals: List[Signal], trades: List[Trade],
-                           positions: dict, prev_positions: dict) -> List[ComparisonResult]:
-    trade_map = {}
-    for t in trades:
-        trade_map.setdefault(t.symbol, []).append(t)
+    if not signals:
+        return {'total': 0, 'message': '当天无信号'}
     
-    results = []
+    results = {
+        'date': date,
+        'total_signals': len(signals),
+        'buy_signals': [],
+        'sell_signals': [],
+        'hold_signals': [],
+        'missing_price_count': 0,
+        'missing_price_codes': [],
+    }
     
-    # 1. 遍历信号
-    for sig in signals:
-        trades_for_symbol = trade_map.get(sig.symbol, [])
-        matching_trade = next((t for t in trades_for_symbol if t.side == sig.side), None)
+    for code, side, price, conf, reason, created in signals:
+        symbol = _normalize_code(code)
         
-        prev_qty = prev_positions.get(sig.symbol, (0, 0))[0]
-        curr_qty = positions.get(sig.symbol, (0, 0))[0]
-        qty_changed = curr_qty != prev_qty
+        # 标记价格缺失（入库时提取失败，非 akshare 问题）
+        if price <= 0:
+            results['missing_price_count'] += 1
+            results['missing_price_codes'].append(symbol)
         
-        actual_price = matching_trade.price if matching_trade else (
-            positions.get(sig.symbol, (0, 0))[1] if qty_changed else None
-        )
+        # 获取后续价格
+        next_1d = get_next_trading_date(date, 1)
+        next_3d = get_next_trading_date(date, 3)
+        next_5d = get_next_trading_date(date, 5)
         
-        price_diff = None
-        if actual_price and sig.signal_price:
-            price_diff = sig.signal_price - actual_price
+        p_1d = get_stock_close_price(symbol, next_1d)
+        p_3d = get_stock_close_price(symbol, next_3d)
+        p_5d = get_stock_close_price(symbol, next_5d)
         
-        match = False
-        if sig.side == 'buy' and curr_qty > prev_qty:
-            match = True
-        elif sig.side == 'sell' and curr_qty < prev_qty:
-            match = True
-        elif sig.side == 'hold' and not qty_changed:
-            match = True
+        result = {
+            'symbol': symbol,
+            'side': side,
+            'signal_price': price,
+            'confidence': conf,
+            'reason': reason[:60],
+        }
         
-        # 计算虚拟收益
-        pnl_1d = calculate_virtual_pnl(sig, hold_days=1)
-        pnl_5d = calculate_virtual_pnl(sig, hold_days=5)
+        if price > 0:
+            if p_1d:
+                result['return_1d'] = round((p_1d - price) / price * 100, 2)
+            if p_3d:
+                result['return_3d'] = round((p_3d - price) / price * 100, 2)
+            if p_5d:
+                result['return_5d'] = round((p_5d - price) / price * 100, 2)
         
-        # 实盘次日收益（如果有实际成交）
-        pnl_actual = None
-        if actual_price and match:
-            next_date = get_next_trading_date(sig.date, 1)
-            next_close = get_stock_close_price(sig.symbol, next_date)
-            if next_close:
-                pnl_actual = (next_close - actual_price) / actual_price * 100
-        
-        results.append(ComparisonResult(
-            symbol=sig.symbol, name=NAME_MAP.get(sig.symbol, sig.symbol),
-            signal_side=sig.side, signal_price=sig.signal_price,
-            has_trade=matching_trade is not None or qty_changed,
-            trade_side=matching_trade.side if matching_trade else (sig.side if qty_changed else None),
-            trade_price=actual_price,
-            trade_qty=abs(curr_qty - prev_qty) if qty_changed else None,
-            price_diff=price_diff, match=match,
-            pnl_signal_1d=pnl_1d, pnl_signal_5d=pnl_5d,
-            pnl_actual_1d=pnl_actual
-        ))
+        if side == 'buy':
+            results['buy_signals'].append(result)
+        elif side == 'sell':
+            results['sell_signals'].append(result)
+        else:
+            results['hold_signals'].append(result)
     
-    # 2. 遗漏检测
-    signaled_symbols = {s.symbol for s in signals}
-    for symbol, trades_list in trade_map.items():
-        if symbol not in signaled_symbols:
-            for t in trades_list:
-                results.append(ComparisonResult(
-                    symbol=symbol, name=NAME_MAP.get(symbol, symbol),
-                    signal_side='none', signal_price=0, has_trade=True,
-                    trade_side=t.side, trade_price=t.price, trade_qty=t.quantity,
-                    price_diff=None, match=False
-                ))
+    # 统计
+    for side_key in ['buy_signals', 'sell_signals']:
+        sigs = results[side_key]
+        if not sigs:
+            continue
+        
+        # 1日胜率
+        returns_1d = [s.get('return_1d') for s in sigs if 'return_1d' in s]
+        if returns_1d:
+            if side_key == 'buy_signals':
+                wins = sum(1 for r in returns_1d if r > 0)
+            else:  # sell: 下跌为赢
+                wins = sum(1 for r in returns_1d if r < 0)
+            results[f'{side_key}_win_rate_1d'] = round(wins / len(returns_1d) * 100, 1)
+            results[f'{side_key}_avg_return_1d'] = round(sum(returns_1d) / len(returns_1d), 2)
+        
+        # 5日胜率
+        returns_5d = [s.get('return_5d') for s in sigs if 'return_5d' in s]
+        if returns_5d:
+            if side_key == 'buy_signals':
+                wins = sum(1 for r in returns_5d if r > 0)
+            else:
+                wins = sum(1 for r in returns_5d if r < 0)
+            results[f'{side_key}_win_rate_5d'] = round(wins / len(returns_5d) * 100, 1)
+            results[f'{side_key}_avg_return_5d'] = round(sum(returns_5d) / len(returns_5d), 2)
     
     return results
 
 
-def print_report(date: str, signals: List[Signal], results: List[ComparisonResult]):
-    print(f'\n=== {date} 信号 vs 实盘复盘 ===\n')
+def print_report(results: Dict):
+    """打印复盘报告"""
+    date = results.get('date', '?')
+    total = results.get('total_signals', 0)
+    missing = results.get('missing_price_count', 0)
+    missing_codes = results.get('missing_price_codes', [])
     
-    total_signals = len(signals)
-    matched = sum(1 for r in results if r.match and r.signal_side != 'none')
-    missed = sum(1 for r in results if r.signal_side == 'none')
+    print(f"\n{'='*60}")
+    print(f"📊 信号质量复盘 | {date}")
+    print(f"{'='*60}")
+    print(f"总信号: {total} 条")
     
-    print(f'【概览】')
-    print(f'  今日信号: {total_signals} 条')
-    print(f'  命中: {matched} / {total_signals} ({matched/total_signals*100:.0f}%)' if total_signals else '  命中: N/A')
-    print(f'  遗漏: {missed} 只')
-    print(f'')
+    # 数据质量说明
+    if missing > 0:
+        print(f"⚠️  数据质量: {missing}/{total} 条信号触发价=0（入库时价格提取失败，非akshare问题）")
+        if missing_codes:
+            codes_str = ', '.join(missing_codes[:5])
+            if len(missing_codes) > 5:
+                codes_str += f' 等{len(missing_codes)}只'
+            print(f"    涉及标的: {codes_str}")
     
-    # 详细对比表
-    print(f'【详细对比】')
-    print(f'{"代码":<15} {"名称":<10} {"信号":<6} {"信号价":>10} {"实盘":<6} {"实盘价":>10} {"偏差":>10} {"1日收益":>10} {"5日收益":>10} {"结果":<6}')
-    print('-' * 115)
-    
-    for r in results:
-        if r.signal_side == 'none':
-            print(f"{r.symbol:<15} {r.name:<10} {'--':<6} {'--':>10} {r.trade_side:<6} {r.trade_price:>10.2f} {'--':>10} {'--':>10} {'--':>10} {'❌遗漏':<6}")
-        else:
-            sig_price = f"{r.signal_price:.2f}" if r.signal_price else '--'
-            trade_price = f"{r.trade_price:.2f}" if r.trade_price else '--'
-            diff = f"{r.price_diff:+.2f}" if r.price_diff is not None else '--'
-            pnl1 = f"{r.pnl_signal_1d:+.2f}%" if r.pnl_signal_1d is not None else '--'
-            pnl5 = f"{r.pnl_signal_5d:+.2f}%" if r.pnl_signal_5d is not None else '--'
-            result = '✅命中' if r.match else '❌偏离'
-            
-            print(f"{r.symbol:<15} {r.name:<10} {r.signal_side:<6} {sig_price:>10} {r.trade_side or '--':<6} {trade_price:>10} {diff:>10} {pnl1:>10} {pnl5:>10} {result:<6}")
-    
-    print('')
-    
-    # 价格偏差分析
-    price_diffs = [r.price_diff for r in results if r.price_diff is not None]
-    if price_diffs:
-        avg_diff = sum(price_diffs) / len(price_diffs)
-        better_count = sum(1 for d in price_diffs if d > 0)
-        print(f'【价格分析】')
-        print(f'  平均偏差: {avg_diff:+.2f}（正=信号更优）')
-        print(f'  信号更优: {better_count} / {len(price_diffs)}')
-        print(f'')
-    
-    # 虚拟收益分析
-    buy_signals = [r for r in results if r.signal_side == 'buy' and r.pnl_signal_1d is not None]
-    if buy_signals:
-        avg_pnl_1d = sum(r.pnl_signal_1d for r in buy_signals) / len(buy_signals)
-        avg_pnl_5d = sum(r.pnl_signal_5d for r in buy_signals if r.pnl_signal_5d is not None) / max(1, sum(1 for r in buy_signals if r.pnl_signal_5d is not None))
-        win_count = sum(1 for r in buy_signals if r.pnl_signal_1d > 0)
+    for side_key, label in [('buy_signals', '买入'), ('sell_signals', '卖出')]:
+        sigs = results.get(side_key, [])
+        if not sigs:
+            continue
         
-        print(f'【虚拟收益分析（买入信号）】')
-        print(f'  样本: {len(buy_signals)} 只')
-        print(f'  次日平均收益: {avg_pnl_1d:+.2f}%')
-        print(f'  5日平均收益: {avg_pnl_5d:+.2f}%')
-        print(f'  次日胜率: {win_count} / {len(buy_signals)} ({win_count/len(buy_signals)*100:.0f}%)')
+        print(f"\n{label}信号 ({len(sigs)}条):")
+        win_1d = results.get(f'{side_key}_win_rate_1d', 0)
+        avg_1d = results.get(f'{side_key}_avg_return_1d', 0)
+        win_5d = results.get(f'{side_key}_win_rate_5d', 0)
+        avg_5d = results.get(f'{side_key}_avg_return_5d', 0)
         
-        # 命中 vs 未命中的收益对比
-        matched_buys = [r for r in buy_signals if r.match]
-        missed_buys = [r for r in buy_signals if not r.match]
-        if matched_buys:
-            avg_matched = sum(r.pnl_signal_1d for r in matched_buys) / len(matched_buys)
-            print(f'  命中信号次日收益: {avg_matched:+.2f}%')
-        if missed_buys:
-            avg_missed = sum(r.pnl_signal_1d for r in missed_buys) / len(missed_buys)
-            print(f'  未命中信号次日收益: {avg_missed:+.2f}%')
-        print(f'')
+        valid_1d = sum(1 for s in sigs if 'return_1d' in s)
+        print(f"  有效统计: {valid_1d}/{len(sigs)} 条（其余 price=0 无法计算）")
+        if valid_1d > 0:
+            print(f"  1日胜率: {win_1d}% | 1日平均: {avg_1d:+.2f}%")
+            print(f"  5日胜率: {win_5d}% | 5日平均: {avg_5d:+.2f}%")
+        
+        # 明细
+        for s in sigs[:5]:
+            r1 = s.get('return_1d', '-')
+            r5 = s.get('return_5d', '-')
+            r1_str = f"{r1:+.2f}%" if isinstance(r1, (int, float)) else r1
+            r5_str = f"{r5:+.2f}%" if isinstance(r5, (int, float)) else r5
+            price_str = f"{s['signal_price']:.2f}" if s['signal_price'] > 0 else "缺失"
+            print(f"    {s['symbol']:12} 信号价={price_str} 1日={r1_str} 5日={r5_str}")
+        if len(sigs) > 5:
+            print(f"    ... 共 {len(sigs)} 条")
     
-    # 实盘收益对比
-    actual_buys = [r for r in results if r.match and r.pnl_actual_1d is not None]
-    if actual_buys:
-        avg_actual = sum(r.pnl_actual_1d for r in actual_buys) / len(actual_buys)
-        avg_signal = sum(r.pnl_signal_1d for r in actual_buys if r.pnl_signal_1d is not None) / max(1, sum(1 for r in actual_buys if r.pnl_signal_1d is not None))
-        print(f'【实盘 vs 信号收益对比】')
-        print(f'  实盘次日平均收益: {avg_actual:+.2f}%')
-        print(f'  信号次日平均收益: {avg_signal:+.2f}%')
-        print(f'  差值: {avg_signal - avg_actual:+.2f}%（正=信号更优）')
-        print(f'')
+    print(f"\n{'='*60}")
+    print(f"💡 建议: 若 price=0 比例过高，检查 signal_pipeline._extract_price_from_content 正则匹配")
+    print(f"{'='*60}\n")
 
 
-def save_review(conn, date: str, results: List[ComparisonResult]):
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS signal_review (
+def save_review(conn, date: str, results: Dict):
+    """保存复盘结果到数据库（保留 signal_review 表结构，但改为质量评估）"""
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS sig_signal_review_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL, symbol TEXT NOT NULL,
-            signal_side TEXT, signal_price REAL,
-            trade_side TEXT, trade_price REAL,
-            match INTEGER, price_diff REAL,
-            pnl_signal_1d REAL, pnl_signal_5d REAL, pnl_actual_1d REAL,
+            date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            signal_side TEXT,
+            signal_price REAL,
+            return_1d REAL,
+            return_3d REAL,
+            return_5d REAL,
+            is_correct INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(date, symbol)
+            UNIQUE(date, symbol, signal_side)
         )
     ''')
     
-    for r in results:
-        cursor.execute('''
-            INSERT OR REPLACE INTO signal_review
-            (date, symbol, signal_side, signal_price, trade_side, trade_price, match, price_diff, pnl_signal_1d, pnl_signal_5d, pnl_actual_1d)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (date, r.symbol, r.signal_side, r.signal_price, r.trade_side,
-              r.trade_price, 1 if r.match else 0, r.price_diff,
-              r.pnl_signal_1d, r.pnl_signal_5d, r.pnl_actual_1d))
+    for side_key in ['buy_signals', 'sell_signals']:
+        for s in results.get(side_key, []):
+            symbol = s['symbol']
+            side = s['side']
+            price = s['signal_price']
+            r1 = s.get('return_1d')
+            r3 = s.get('return_3d')
+            r5 = s.get('return_5d')
+            
+            # 是否正确（buy 涨为对，sell 跌为对）
+            is_correct = None
+            if r1 is not None:
+                if side == 'buy':
+                    is_correct = 1 if r1 > 0 else 0
+                elif side == 'sell':
+                    is_correct = 1 if r1 < 0 else 0
+            
+            c.execute('''
+                INSERT OR REPLACE INTO sig_signal_review_v2
+                (date, symbol, signal_side, signal_price, return_1d, return_3d, return_5d, is_correct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (date, symbol, side, price, r1, r3, r5, is_correct))
     
     conn.commit()
 
@@ -395,27 +363,14 @@ def main():
         date = d.strftime('%Y-%m-%d')
     
     print(f'正在复盘 {date}...')
+    results = evaluate_signal_quality(date)
+    print_report(results)
     
     conn = sqlite3.connect(DB_PATH)
-    prev_date = (datetime.strptime(date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-    
-    signals = get_signals(conn, date)
-    trades = get_trades(conn, date)
-    positions = get_positions(conn, date)
-    prev_positions = get_positions(conn, prev_date)
-    
-    if not signals:
-        print(f"警告: {date} 没有信号记录")
-        print("提示: 信号需要先录入到 decision_signals 表")
-        return 0
-    
-    results = compare_signals_trades(signals, trades, positions, prev_positions)
-    print_report(date, signals, results)
     save_review(conn, date, results)
-    
     conn.close()
-    return 0
+    print(f"✅ 已保存到 signal_review_v2")
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    main()

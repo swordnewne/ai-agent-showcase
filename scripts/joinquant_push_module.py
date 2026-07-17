@@ -3,7 +3,7 @@
 # 将交易记录、持仓快照、每日资产自动推送到外部API
 
 import json
-import urllib2
+import urllib.request
 import time
 
 # ==================== 配置区域 ====================
@@ -36,8 +36,8 @@ def _push_data(payload, context):
     
     for attempt in range(PUSH_MAX_RETRY + 1):
         try:
-            req = urllib2.Request(PUSH_API_URL, data=data, headers=headers)
-            response = urllib2.urlopen(req, timeout=10)
+            req = urllib.request.Request(PUSH_API_URL, data=data, headers=headers, method='POST')
+            response = urllib.request.urlopen(req, timeout=10)
             result = response.read()
             log.info('推送成功: %s' % payload.get('type', 'unknown'))
             return True

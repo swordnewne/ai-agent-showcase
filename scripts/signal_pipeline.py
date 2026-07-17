@@ -1,0 +1,1 @@
+/root/.openclaw/workspace/showcase/src/financial/signal_pipeline.py

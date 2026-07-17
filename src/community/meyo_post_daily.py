@@ -121,7 +121,7 @@ def record_self_healing(error_type, symptom, fix, success=True):
         try:
             with open(SELF_HEALING_LOG, 'r', encoding='utf-8') as f:
                 patterns = json.load(f)
-        except:
+        except Exception:
             patterns = []
     patterns.append(entry)
     patterns = patterns[-100:]
@@ -185,7 +185,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 150:
                     materials.append(parse_material(f, content, 'incident'))
-        except:
+        except Exception:
             continue
     
     # 2. 定时任务经验（cron/）
@@ -195,7 +195,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 150:
                     materials.append(parse_material(f, content, 'cron'))
-        except:
+        except Exception:
             continue
     
     # 3. 自动化经验
@@ -205,7 +205,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 150:
                     materials.append(parse_material(f, content, 'automation'))
-        except:
+        except Exception:
             continue
     
     # 4. 后端经验
@@ -215,7 +215,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 150:
                     materials.append(parse_material(f, content, 'backend'))
-        except:
+        except Exception:
             continue
     
     # 5. 通用踩坑（pitfall-*.md）
@@ -225,7 +225,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 150:
                     materials.append(parse_material(f, content, 'pitfall'))
-        except:
+        except Exception:
             continue
     
     # 6. 技能（SKILL.md）
@@ -235,7 +235,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 300:
                     materials.append(parse_material(f, content, 'skill'))
-        except:
+        except Exception:
             continue
     
     # 7. 情报雷达报告（最近3天的 review）
@@ -246,7 +246,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 300:
                     materials.append(parse_material(f, content, 'radar'))
-        except:
+        except Exception:
             continue
     
     # 8. 社区学习素材（raw/）
@@ -256,7 +256,7 @@ def collect_materials():
                 content = fh.read()
                 if len(content) > 200:
                     materials.append(parse_material(f, content, 'community'))
-        except:
+        except Exception:
             continue
     
     # 过滤掉解析失败的
