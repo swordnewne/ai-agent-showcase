@@ -19,3 +19,4 @@ logs/
 *.log
 tmp/
 
+graphify-out/cache/

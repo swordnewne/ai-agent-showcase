@@ -828,8 +828,41 @@
       "why": "inferred connection - not explicitly stated in source; bridges separate communities"
     }
   ],
-  "tokens": {
-    "input": 0,
-    "output": 0
-  }
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `PortfolioTracker` connect `PortfolioTracker` to `launcher.py`, `DataProvider`?",
+      "why": "High betweenness centrality (0.028) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `SignalTracker` connect `SignalTracker` to `launcher.py`?",
+      "why": "High betweenness centrality (0.024) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 2 inferred relationships involving `PortfolioTracker` (e.g. with `TradingSystemLauncher` and `DataProvider`) actually correct?",
+      "why": "`PortfolioTracker` has 2 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 2 inferred relationships involving `DataProvider` (e.g. with `PortfolioOversellError` and `PortfolioTracker`) actually correct?",
+      "why": "`DataProvider` has 2 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `daily_portfolio_update.sh script`, `setup_cron.sh script` to the rest of the system?",
+      "why": "2 weakly-connected nodes found - possible documentation gaps or missing edges."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `launcher.py` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.06292517006802721 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `signal_pipeline.py` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.10160427807486631 - nodes in this community are weakly interconnected."
+    }
+  ]
 }
