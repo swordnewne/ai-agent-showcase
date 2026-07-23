@@ -26,7 +26,7 @@ from scrapling.fetchers import Fetcher
 
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(WORKSPACE, "data")
-ALERTS_DIR = os.path.join(WORKSPACE, ".alerts")
+ALERTS_DIR = os.path.join(os.path.dirname(WORKSPACE), ".alerts")
 NEWS_FILE = os.path.join(DATA_DIR, "news_realtime.jsonl")
 
 # DeepSeek API
@@ -167,6 +167,40 @@ def fetch_gov() -> List[Dict]:
         return []
 
 
+SENT_ALERTS_FILE = os.path.join(DATA_DIR, "sent_alerts.json")
+SENT_TTL_HOURS = 12  # 已推送新闻的TTL
+
+
+def load_sent_alerts() -> Dict[str, str]:
+    """加载已推送记录 {title_hash: timestamp}"""
+    if not os.path.exists(SENT_ALERTS_FILE):
+        return {}
+    try:
+        with open(SENT_ALERTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 清理过期记录
+        cutoff = (datetime.now(timezone(timedelta(hours=8))) - timedelta(hours=SENT_TTL_HOURS)).isoformat()
+        return {k: v for k, v in data.items() if v > cutoff}
+    except:
+        return {}
+
+
+def save_sent_alerts(sent: Dict[str, str]):
+    """保存已推送记录"""
+    try:
+        with open(SENT_ALERTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sent, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 保存已推送记录失败: {e}")
+
+
+def get_news_hash(news: Dict) -> str:
+    """生成新闻唯一标识（基于标题前30字）"""
+    title = news.get("title", "").strip()[:30]
+    import hashlib
+    return hashlib.md5(title.encode("utf-8")).hexdigest()[:12]
+
+
 def dedup_news(all_news: List[Dict]) -> List[Dict]:
     unique = []
     for news in all_news:
@@ -301,13 +335,67 @@ def ai_analyze_all(news_list: List[Dict]) -> Dict[int, Dict]:
                 content = result["choices"][0]["message"]["content"]
                 
                 text = content.strip()
-                if text.startswith("```json"):
-                    text = text[7:]
-                if text.endswith("```"):
-                    text = text[:-3]
-                text = text.strip()
+                # 多层清理：处理各种可能的包裹格式
+                for prefix in ["```json", "```JSON", "```", "json"]:
+                    if text.startswith(prefix):
+                        text = text[len(prefix):].strip()
+                for suffix in ["```", "`"]:
+                    if text.endswith(suffix):
+                        text = text[:-len(suffix)].strip()
                 
-                analysis = json.loads(text)
+                # 尝试解析 JSON
+                analysis = None
+                parse_errors = []
+                
+                # 尝试1：直接解析
+                try:
+                    analysis = json.loads(text)
+                except json.JSONDecodeError as e1:
+                    parse_errors.append(f"直接解析失败: {e1}")
+                    
+                    # 尝试2：正则提取 JSON 块（找最外层的花括号）
+                    import re
+                    json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if json_match:
+                        try:
+                            analysis = json.loads(json_match.group(0))
+                        except json.JSONDecodeError as e2:
+                            parse_errors.append(f"正则提取失败: {e2}")
+                    
+                    # 尝试3：清理常见污染字符后解析
+                    if analysis is None:
+                        cleaned = text.replace('\n', ' ').replace('\\', '\\\\')
+                        cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)  # 去除尾随逗号
+                        try:
+                            analysis = json.loads(cleaned)
+                        except json.JSONDecodeError as e3:
+                            parse_errors.append(f"清理后解析失败: {e3}")
+                
+                if analysis is None:
+                    print(f"  ⚠️ 批次{batch_idx+1}/{batches} JSON解析失败，尝试提取可用信息")
+                    print(f"     错误详情: {'; '.join(parse_errors)}")
+                    # 兜底：尝试用简单规则分析（关键词匹配）
+                    for local_idx, news in enumerate(uncovered_news):
+                        global_idx = uncovered_indices[local_idx]
+                        title = news.get("title", "")
+                        # 简单规则：标题含"板块"或"行业"→high，否则normal
+                        if any(kw in title for kw in ["板块", "行业", "政策", "大涨", "暴跌"]):
+                            all_results[global_idx] = {
+                                "importance": "high",
+                                "sectors": [],
+                                "reason": "关键词触发（AI解析失败时的兜底规则）",
+                                "impact_type": "sector-specific"
+                            }
+                        else:
+                            all_results[global_idx] = {
+                                "importance": "normal",
+                                "sectors": [],
+                                "reason": "AI解析失败，默认normal",
+                                "impact_type": "noise"
+                            }
+                    print(f"  ✅ 批次{batch_idx+1}/{batches} 兜底完成（规则分析）")
+                    continue
+                
                 for item in analysis.get("analysis", []):
                     local_idx = item.get("index", 1) - 1
                     if 0 <= local_idx < len(uncovered_indices):
@@ -488,21 +576,36 @@ def main():
     save_news(all_news)
     print(f"\n✅ 已保存到 {NEWS_FILE}")
     
-    # 推送：urgent + HIGH
+    # 推送：urgent + HIGH（跨轮次去重）
     urgent_list = [(n, a) for n, a in urgent_news if a["importance"] == "urgent"]
     high_list = [(n, a) for n, a in urgent_news if a["importance"] == "high"]
     
-    to_push = urgent_list[:3] + high_list[:3]
+    # 加载已推送记录
+    sent_alerts = load_sent_alerts()
+    now_iso = datetime.now(timezone(timedelta(hours=8))).isoformat()
+    
+    to_push = []
+    skipped = 0
+    for news, analysis in urgent_list[:3] + high_list[:3]:
+        news_hash = get_news_hash(news)
+        if news_hash in sent_alerts:
+            skipped += 1
+            print(f"⏭️ 已推送过，跳过: {news['title'][:40]}...")
+            continue
+        to_push.append((news, analysis))
+        sent_alerts[news_hash] = now_iso
     
     if to_push:
         print(f"\n🚨 URGENT: {len(urgent_list)}条, HIGH: {len(high_list)}条")
-        print(f"📤 实际推送: {len(to_push)}条")
+        print(f"📤 实际推送: {len(to_push)}条 (跳过{skipped}条重复)")
         for news, analysis in to_push:
             alert_msg = format_alert(news, analysis)
             queue_alert(alert_msg)
             print(f"📤 已推送: {news['title'][:40]}...")
+        # 保存已推送记录
+        save_sent_alerts(sent_alerts)
     else:
-        print("ℹ️ 无重要新闻")
+        print(f"ℹ️ 无重要新闻 (跳过{skipped}条重复)")
     
     print(f"\n=== 采集完成 ===")
     return 0
