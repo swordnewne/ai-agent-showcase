@@ -42,6 +42,29 @@ def _load_cookies():
     print("❌ Cookie文件不存在，请先运行 jq_login_guard.py")
     return {}
 
+
+def auto_relogin():
+    """Cookie失效时自动重新登录"""
+    import subprocess
+    guard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jq_login_guard.py")
+    backtest_id = os.environ.get("JQ_BACKTEST_ID", "7c4b652682db54ddc42e168a089cfbd5")
+    print("   🔄 Cookie失效，自动触发重新登录...")
+    try:
+        result = subprocess.run(
+            ["python3", guard_path, "--force", "--backtest-id", backtest_id],
+            capture_output=True, text=True, timeout=120
+        )
+        if "登录成功" in result.stdout:
+            print("   ✅ 重新登录成功")
+            return True
+        else:
+            print(f"   ❌ 重新登录失败: {result.stdout[:200]}")
+            return False
+    except Exception as e:
+        print(f"   ❌ 重新登录异常: {e}")
+        return False
+
+
 COOKIES = _load_cookies()
 
 HEADERS = {
@@ -52,10 +75,26 @@ HEADERS = {
 
 
 def fetch_api(backtest_id, data_type):
-    """获取API数据"""
+    """获取API数据，支持Cookie失效自动重登"""
+    global COOKIES
     url = f"https://www.joinquant.com/algorithm/backtest/export?type={data_type}&backtestId={backtest_id}"
     
-    # 增加超时和重试
+    # 第一轮：用当前Cookie
+    text = _do_request(url)
+    
+    # 检测到Cookie失效（20000）→ 自动重登
+    if text and '"code":"20000"' in text:
+        if auto_relogin():
+            COOKIES = _load_cookies()  # 重新加载新Cookie
+            text = _do_request(url)     # 重试
+        else:
+            return None
+    
+    return text
+
+
+def _do_request(url):
+    """执行HTTP请求，带重试"""
     retries = 3
     for attempt in range(retries):
         try:
@@ -265,7 +304,7 @@ def save_to_db(trades, positions):
 
 
 def main():
-    backtest_id = os.environ.get("JQ_BACKTEST_ID", "d8d7a951ece4a7bd995bf9ee62db0273")
+    backtest_id = os.environ.get("JQ_BACKTEST_ID", "7c4b652682db54ddc42e168a089cfbd5")
     
     print(f"=== 聚宽数据抓取 ===")
     print(f"Backtest ID: {backtest_id}\n")
