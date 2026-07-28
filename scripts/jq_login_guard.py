@@ -43,7 +43,7 @@ def get_credentials():
     return None
 
 
-def check_cookie_valid(backtest_id=None):
+def check_cookie_valid():
     """检测 Cookie 是否有效——通过实际API请求测试"""
     import requests
     
@@ -66,47 +66,37 @@ def check_cookie_valid(backtest_id=None):
             print(f"Cookie 缺少关键字段: {missing}")
             return False
         
+        # 实际API测试：访问持仓导出接口（轻量请求）
+        # 即使 backtestId 无效，只要 Cookie 有效，服务器会返回 400 而非 302
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://www.joinquant.com/algorithm/live/index",
         }
         
-        # 优先用真实backtestId测试（最准确）
-        test_bid = backtest_id or "test"
+        # 用一个通用的API测试
         resp = requests.get(
-            f"https://www.joinquant.com/algorithm/backtest/export?type=position&backtestId={test_bid}",
+            "https://www.joinquant.com/algorithm/backtest/export?type=position&backtestId=test",
             headers=headers,
             cookies=cookie_dict,
             timeout=(5, 10),
             allow_redirects=True
         )
         
-        # 解析响应内容判断
-        text = resp.text
-        
-        # 情况1: 返回JSON且code=20000 → Cookie有效（只是backtestId不对）
-        if '"code":"20000"' in text:
+        # Cookie 有效时：即使参数错误也返回 400（服务器已识别用户）
+        # Cookie 无效时：返回 302/401 重定向到登录页
+        if resp.status_code in (200, 400, 404):
+            # 检查响应内容是否包含登录提示
+            if resp.text and ("login" in resp.text.lower() or "登录" in resp.text or "请登录" in resp.text):
+                print(f"⚠️ Cookie 无效: 响应包含登录提示")
+                return False
             print(f"✅ Cookie 有效 ({len(cookie_dict)} 个)")
             return True
-        
-        # 情况2: 返回CSV数据 → Cookie有效且backtestId也有效
-        if "标的" in text or "," in text[:100]:
-            print(f"✅ Cookie 有效 ({len(cookie_dict)} 个)，且数据可获取")
-            return True
-        
-        # 情况3: 包含登录提示 → Cookie无效
-        if "login" in text.lower() or "登录" in text or "请登录" in text or "重新登录" in text:
-            print(f"⚠️ Cookie 无效: 响应包含登录提示")
-            return False
-        
-        # 情况4: HTTP重定向状态码
-        if resp.status_code in (302, 301, 401):
+        elif resp.status_code in (302, 301, 401):
             print(f"⚠️ Cookie 无效: HTTP {resp.status_code} (重定向到登录)")
             return False
-        
-        # 兜底：状态码正常但内容未知，按有效处理（保守策略）
-        print(f"⚠️ Cookie 状态未知: HTTP {resp.status_code}，按有效处理")
-        return True
+        else:
+            print(f"⚠️ Cookie 状态未知: HTTP {resp.status_code}，按有效处理")
+            return True
             
     except Exception as e:
         print(f"Cookie 检测异常: {e}")
@@ -207,7 +197,6 @@ def main():
     parser = argparse.ArgumentParser(description="聚宽登录守护")
     parser.add_argument("--force", action="store_true", help="强制重新登录")
     parser.add_argument("--check-only", action="store_true", help="仅检测，不自动登录")
-    parser.add_argument("--backtest-id", default="7c4b652682db54ddc42e168a089cfbd5", help="用于Cookie验证的回测ID")
     args = parser.parse_args()
     
     # 强制重新登录
@@ -218,7 +207,7 @@ def main():
     
     # 检查 Cookie 有效性
     print("检测 Cookie 有效性...")
-    if check_cookie_valid(backtest_id=args.backtest_id):
+    if check_cookie_valid():
         print("✅ Cookie 正常，无需操作")
         sys.exit(0)
     
@@ -232,7 +221,7 @@ def main():
     
     if success:
         # 再次验证
-        if check_cookie_valid(backtest_id=args.backtest_id):
+        if check_cookie_valid():
             print("✅ Cookie 刷新成功")
             sys.exit(0)
         else:
