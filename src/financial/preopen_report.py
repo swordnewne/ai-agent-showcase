@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(WORKSPACE, "skills", "automation", "scrapling-ad
 
 from market_data import fetch_all_market_data
 from nav_fetcher import fetch_nav, fetch_fund_price
-from premium_history import save_record, get_recent_stats, get_percentile
+from premium_history import save_record, get_recent_stats, get_percentile, multi_window_percentile
 from preopen_runs import record_run, today_str
 from trade_calendar import get_trade_date
 from fx_history import record_fx, get_fx_prev, fx_change_ratio
@@ -442,16 +442,18 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
     session = nav_calc.get("session") or {}
     report_title = session.get("title", "盘前交易简报")
 
-    # 历史分位点（需要历史溢价序列，冷启动阶段数据不足时自动置空）
-    # 用券商口径溢价率做比较 —— 回填的历史序列正是同口径，
-    # 这样才能做到 apples-to-apples；估算口径不参与分位点。
+    # 历史分位点（多窗口 + 平稳性提示）
+    #
+    # 单一窗口不可靠：两年数据显示溢价中枢单调上升（制度切换），
+    # 同一个 4.69% 在近30日窗口是 73% 分位、全样本却是 92%。
+    # 用券商口径溢价率作分母 —— 与回填历史序列同口径。
     pct_info = {}
     try:
         _base = nav_calc.get("broker_premium_pct")
         if _base is None:
             _base = nav_calc.get("deviation_pct")
         if _base is not None:
-            pct_info = get_percentile(_base, days=30) or {}
+            pct_info = multi_window_percentile(_base) or {}
     except Exception:
         pct_info = {}
 
@@ -480,11 +482,13 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
             f"净值 {nav_calc.get('nav_date') or '?'}（QDII 净值披露滞后所致）"
         )
 
-    if pct_info.get("has_data"):
-        percentile_line = (
-            f"| 历史分位 | {pct_info.get('description', 'N/A')}"
-            f"（近 {pct_info.get('count')} 个交易日，中位 {pct_info.get('median')}%） |\n"
+    if pct_info.get("has_data") and pct_info.get("windows"):
+        _parts = " / ".join(
+            f"{w['label']} {w['below_pct']:.0f}%" for w in pct_info["windows"]
         )
+        percentile_line = f"| 历史分位 | {_parts} |\n"
+        if pct_info.get("regime_note"):
+            percentile_line += f"| 平稳性 | {pct_info['regime_note']} |\n"
     else:
         percentile_line = ""
     applicable = session.get("applicable", "")

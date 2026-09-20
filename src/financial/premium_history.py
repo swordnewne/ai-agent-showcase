@@ -4,8 +4,9 @@
 从今天开始每天自动记录：日期、净值、价格、溢价率
 """
 
-import sqlite3
 import os
+import sqlite3
+import statistics
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -76,6 +77,69 @@ def get_recent_stats(days: int = 30) -> dict:
         "min_premium": round(min(premiums), 2) if premiums else None,
         "max_premium": round(max(premiums), 2) if premiums else None,
         "latest": rows[0],
+    }
+
+
+def multi_window_percentile(current_premium: float, windows=(30, 60, 120, 250, None)) -> dict:
+    """
+    多窗口分位点
+
+    为什么必须多窗口:
+      两年数据显示 161130 的溢价率存在明显【制度切换】——
+        2024H2 均值 0.30% / 正溢价占比 46%
+        2026H2 均值 3.92% / 正溢价占比 100%
+      单调上升，分布非平稳。
+
+      同一溢价率在不同窗口下分位差异极大（实测 4.69%: 近30日 73% vs 全样本 92%）。
+      单一窗口会误导，因此并列输出，并附平稳性提示。
+
+    以【记录条数】而非日历天数取窗口 —— 交易日更均匀。
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT trade_date, premium_pct FROM fund_161130_history "
+        "WHERE premium_pct IS NOT NULL ORDER BY trade_date"
+    ).fetchall()
+    conn.close()
+
+    series = [p for _, p in rows]
+    if not series:
+        return {"current": current_premium, "windows": [], "has_data": False}
+
+    out = []
+    for w in windows:
+        sub = series[-w:] if w and w < len(series) else series
+        if len(sub) < 5:
+            continue
+        below = sum(1 for x in sub if x < current_premium) / len(sub) * 100
+        out.append({
+            "label": f"近{w}日" if (w and w < len(series)) else "全样本",
+            "n": len(sub),
+            "median": round(statistics.median(sub), 2),
+            "below_pct": round(below, 1),
+            "mean": round(statistics.mean(sub), 2),
+        })
+
+    # 平稳性检测：前后两个等长窗口的均值差异
+    regime_note = ""
+    if len(series) >= 60:
+        half = len(series) // 2
+        early, late = series[:half], series[half:]
+        md = statistics.mean(late) - statistics.mean(early)
+        if abs(md) >= 0.8:
+            regime_note = (
+                f"⚠️ 分布非平稳：后半段均值 {statistics.mean(late):.2f}% vs "
+                f"前半段 {statistics.mean(early):.2f}%（差 {md:+.2f}pp）。"
+                "历史分位仅供参考——溢价中枢本身在移动，"
+                "分位点所假设的平稳分布在此不成立。"
+            )
+
+    return {
+        "current": current_premium,
+        "windows": out,
+        "has_data": True,
+        "regime_note": regime_note,
     }
 
 

@@ -58,6 +58,14 @@ def _num(v):
         return None
 
 
+def _pick(row: dict, *names):
+    """按候选列名取第一个非空值（不同数据源的列名不一致）"""
+    for n in names:
+        if n in row and (row[n] or "").strip():
+            return row[n]
+    return None
+
+
 def import_csv(csv_path: str) -> dict:
     path = Path(csv_path)
     if not path.exists():
@@ -69,10 +77,10 @@ def import_csv(csv_path: str) -> dict:
     # utf-8-sig 处理 BOM（表头首列是 '\ufeff日期'）
     with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
-            trade_date = (row.get("日期") or "").strip()
-            price = _num(row.get("收盘"))
-            nav = _num(row.get("单位净值"))
-            premium = _num(row.get("溢价率%"))
+            trade_date = (_pick(row, "日期", "交易日期", "date") or "").strip()
+            price = _num(_pick(row, "收盘价", "收盘", "close"))
+            nav = _num(_pick(row, "单位净值", "净值", "nav"))
+            premium = _num(_pick(row, "溢价率%", "溢价率", "premium"))
 
             if not trade_date or price is None:
                 skipped += 1
