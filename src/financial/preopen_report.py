@@ -33,6 +33,7 @@ from premium_history import save_record, get_recent_stats, get_percentile
 from preopen_runs import record_run, today_str
 from trade_calendar import get_trade_date
 from fx_history import record_fx, get_fx_prev, fx_change_ratio
+from market_session import get_session
 
 def _load_deepseek_config():
     """加载 DeepSeek 配置（环境变量或 .env 文件）"""
@@ -113,7 +114,7 @@ def fetch_news_24h() -> list:
     return news_list
 
 
-def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_override: float = None, price_source: str = "hardcoded", fx_prev_override: float = None) -> dict:
+def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_override: float = None, price_source: str = "hardcoded", fx_prev_override: float = None, session: dict = None) -> dict:
     """
     估算 161130 盘前净值
     
@@ -178,6 +179,7 @@ def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_overri
         "estimated_range_high": round(estimated * 1.005, 4),
         "prev_close": prev_close,
         "prev_close_source": price_source,
+        "session": session or {},
         "deviation_pct": round(deviation, 2) if deviation else None,
         "nav_stale_days": stale_days,
         "note": "估算值仅供参考，实际净值以基金公司公布为准",
@@ -410,9 +412,17 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 - 置信度: {s.get('confidence', 'medium')}
 """)
     
-    report = f"""# 盘前交易简报 ({trade_date})
+    session = nav_calc.get("session") or {}
+    report_title = session.get("title", "盘前交易简报")
+    applicable = session.get("applicable", "")
+    price_label = session.get("price_label", "前收盘价")
+    dev_label = session.get("deviation_label", "盘前参考偏离率")
+
+    report = f"""# {report_title} ({trade_date})
 
 > 报告生成时间: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')}
+> 生成时段: {session.get('phase_cn', '未知')}
+> {applicable}
 > 数据完整度: {'完整' if not missing else '部分缺失'}
 
 ---
@@ -436,10 +446,10 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 | 指标 | 数值 |
 |------|------|
 | 最新官方净值 | {nav_calc.get('official_nav', 'N/A')} ({nav_calc.get('official_nav_date', 'N/A')}) |
-| 盘前估算净值 | **{nav_calc.get('estimated_nav', 'N/A')}** |
+| {'盘前估算净值' if session.get('price_role') == 'prev_close' else '估算净值'} | **{nav_calc.get('estimated_nav', 'N/A')}** |
 | 估算区间 | {nav_calc.get('estimated_range_low', 'N/A')} - {nav_calc.get('estimated_range_high', 'N/A')} |
-| 前收盘价 | {nav_calc.get('prev_close', 'N/A')} ({'实时抓取' if nav_calc.get('prev_close_source') == 'sina' else '⚠️ 回退值'}) |
-| 盘前参考偏离率 | **{nav_calc.get('deviation_pct', 'N/A')}%** |
+| {price_label} | {nav_calc.get('prev_close', 'N/A')} ({'实时抓取' if nav_calc.get('prev_close_source') == 'sina' else '⚠️ 回退值'}) |
+| {dev_label} | **{nav_calc.get('deviation_pct', 'N/A')}%** |
 | 净值新鲜度 | {nav_calc.get('nav_stale_days', 'N/A')} 天前 |
 
 > ⚠️ 说明: {nav_calc.get('note', '')}
@@ -485,7 +495,7 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 ## 七、风险提示
 
 {chr(10).join(['- ' + r for r in risks]) if risks else '- 本报告不构成投资建议'}
-- 盘前参考偏离率使用昨日收盘价计算，非今日可成交溢价率
+- {dev_label}基于{session.get('price_role', 'prev_close') == 'prev_close' and '昨日收盘价' or session.get('price_label', '盘中价')}计算
 - 估算净值基于纳指期货，实际净值以基金公司公布为准
 """
     
@@ -546,7 +556,13 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
     else:
         print("  汇率前值: 暂无历史（首次运行，本次不计汇率变动）")
 
-    nav_calc = calculate_estimated_nav(nav_data, market_data, fund_prev_close, price_source, fx_prev_val)
+    # 3d. 判定当前交易时段（报告措辞随之变化）
+    session = get_session()
+    print(f"\n[时段] {session['phase_cn']} → {session['title']}")
+    if session["price_role"] != "prev_close":
+        print(f"  [注意] 盘中/盘后生成，最新价为{session['price_label']}，非昨日收盘")
+
+    nav_calc = calculate_estimated_nav(nav_data, market_data, fund_prev_close, price_source, fx_prev_val, session)
     if "error" in nav_calc:
         print(f"  计算失败: {nav_calc['error']}")
     else:
