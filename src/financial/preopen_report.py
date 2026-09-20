@@ -16,7 +16,6 @@
 import os
 import sys
 import json
-import re
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -29,13 +28,14 @@ sys.path.insert(0, os.path.join(WORKSPACE, "skills", "automation", "scrapling-ad
 
 from market_data import fetch_all_market_data
 from nav_fetcher import fetch_nav, fetch_fund_price
-from premium_history import save_record, get_recent_stats, get_percentile, multi_window_percentile
+from premium_history import save_record, multi_window_percentile
 from preopen_runs import record_run, today_str
 from trade_calendar import get_trade_date
 from fx_history import record_fx, get_fx_prev, fx_change_ratio
 from market_session import get_session
 from us_market import cumulative_index_ratio
 from estimate_log import log_estimate, reconcile
+from subscription_watch import watch_line as sub_watch_line
 
 def _load_deepseek_config():
     """加载 DeepSeek 配置（环境变量或 .env 文件）"""
@@ -229,7 +229,7 @@ def build_deepseek_prompt(market_data: dict, nav_calc: dict, news_list: list) ->
     # 新闻摘要（取前15条）
     news_summary = []
     for i, news in enumerate(news_list[:15], 1):
-        news_summary.append(f"{i}. [{news['media']}] {news['title']}")
+        news_summary.append(f"{i}. [{news.get('media', '未知来源')}] {news.get('title', '')}")
     
     # 161130 数据
     nav_text = f"""
@@ -410,7 +410,7 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
     # 新闻列表（取前10条）
     news_lines = []
     for i, news in enumerate(news_list[:10], 1):
-        news_lines.append(f"{i}. [{news['media']}] {news['title']}")
+        news_lines.append(f"{i}. [{news.get('media', '未知来源')}] {news.get('title', '')}")
     
     # 数据新鲜度防呆
     stale_days = nav_calc.get("nav_stale_days")
@@ -474,6 +474,12 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
         index_line = "无需修正（净值基准日即最新） |"
     else:
         index_line = f"⚠️ 不可用（{_ii.get('reason', '未知')}） |"
+
+    # 申购政策监控（恢复申购是前瞻信号：套利通道重开 → 溢价大概率向下）
+    try:
+        sub_line = sub_watch_line()
+    except Exception as _e:
+        sub_line = f"⚠️ 监控失败（{_e}）"
     if nav_calc.get("broker_premium_paired"):
         pair_note = f"同日配对 ✅（价格与净值均为 {nav_calc.get('nav_date')}）"
     else:
@@ -528,6 +534,7 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 | 配对情况 | {pair_note} |
 | 估算净值 | {nav_calc.get('estimated_nav', 'N/A')} |
 | 指数修正 | {index_line}
+| 申购政策 | {sub_line} |
 | {dev_label}（估算口径） | {nav_calc.get('deviation_pct', 'N/A')}% |
 | 净值新鲜度 | {nav_calc.get('nav_stale_days', 'N/A')} 天前 |
 {percentile_line}
@@ -609,9 +616,10 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
     # 2. 拉取市场数据
     print("\n[1/5] 拉取市场数据...")
     market_data = fetch_all_market_data()
-    print(f"  纳指期货: {market_data['nasdaq'].get('latest', '失败')}")
-    print(f"  汇率: {market_data['usd_cny'].get('latest', '失败')}")
-    
+    _nq = market_data.get("nasdaq") or {}
+    _fx = market_data.get("usd_cny") or {}
+    print(f"  纳指期货: {_nq.get('latest', '失败')}")
+    print(f"  汇率: {_fx.get('latest', '失败')}")
     # 3. 拉取 161130 净值
     print("\n[2/5] 拉取 161130 净值...")
     nav_data = fetch_nav()

@@ -116,11 +116,6 @@ def get_session(now: datetime = None) -> dict:
     return meta
 
 
-def is_intraday(now: datetime = None) -> bool:
-    """行情是否处于盘中（此时最新价不等于昨日收盘）"""
-    return get_session(now)["price_role"] in ("intraday", "close")
-
-
 if __name__ == "__main__":
     s = get_session()
     print(f"当前时段: {s['phase_cn']} ({s['phase']})")
