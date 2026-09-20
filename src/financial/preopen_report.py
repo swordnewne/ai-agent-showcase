@@ -34,6 +34,7 @@ from preopen_runs import record_run, today_str
 from trade_calendar import get_trade_date
 from fx_history import record_fx, get_fx_prev, fx_change_ratio
 from market_session import get_session
+from us_market import cumulative_index_ratio
 
 def _load_deepseek_config():
     """加载 DeepSeek 配置（环境变量或 .env 文件）"""
@@ -114,7 +115,7 @@ def fetch_news_24h() -> list:
     return news_list
 
 
-def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_override: float = None, price_source: str = "hardcoded", fx_prev_override: float = None, session: dict = None, price_date: str = None) -> dict:
+def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_override: float = None, price_source: str = "hardcoded", fx_prev_override: float = None, session: dict = None, price_date: str = None, index_ratio: float = 1.0, index_info: dict = None) -> dict:
     """
     估算 161130 盘前净值
     
@@ -152,7 +153,12 @@ def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_overri
             fx_change = _ratio
             fx_source = "history"
     
-    estimated = nav * nq_change * fx_change
+    # 三因子估算：
+    #   1) index_ratio —— 从净值基准日到报告日之间【已收盘】美股场次的累计变动。
+    #      这是确定性数据（已经发生的行情），早期实现整个漏算了这一段。
+    #   2) nq_change  —— 报告日当日尚未收盘那一场的期货隐含变动。
+    #   3) fx_change  —— 汇率变动。
+    estimated = nav * (index_ratio or 1.0) * nq_change * fx_change
 
     # 净值新鲜度（防呆：QDII 净值有滞后，过旧必须提示）
     stale_days = None
@@ -184,6 +190,8 @@ def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_overri
         "broker_premium_paired": paired,
         "price_date": price_date,
         "nav_date": nav_date,
+        "index_ratio": index_ratio,
+        "index_info": index_info or {},
         "official_nav": nav,
         "official_nav_date": nav_date,
         "nasdaq_futures": nq_latest,
@@ -449,6 +457,20 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
     # 券商口径溢价率
     _bp = nav_calc.get("broker_premium_pct")
     broker_pct = f"{_bp}%" if _bp is not None else "N/A"
+
+    # 指数修正说明（已收盘美股场次的累计变动）
+    _ii = nav_calc.get("index_info") or {}
+    _ir = nav_calc.get("index_ratio") or 1.0
+    if _ii.get("ok") and _ii.get("sessions"):
+        index_line = (
+            f"{( _ir - 1) * 100:+.3f}%"
+            f"（纳指100 {_ii.get('from_date')} → {_ii.get('to_date')}，"
+            f"{len(_ii.get('sessions') or [])} 个已完成场次） |"
+        )
+    elif _ii.get("ok"):
+        index_line = "无需修正（净值基准日即最新） |"
+    else:
+        index_line = f"⚠️ 不可用（{_ii.get('reason', '未知')}） |"
     if nav_calc.get("broker_premium_paired"):
         pair_note = f"同日配对 ✅（价格与净值均为 {nav_calc.get('nav_date')}）"
     else:
@@ -500,6 +522,7 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 | **溢价率（券商口径）** | **{broker_pct}** |
 | 配对情况 | {pair_note} |
 | 估算净值 | {nav_calc.get('estimated_nav', 'N/A')} |
+| 指数修正 | {index_line}
 | {dev_label}（估算口径） | {nav_calc.get('deviation_pct', 'N/A')}% |
 | 净值新鲜度 | {nav_calc.get('nav_stale_days', 'N/A')} 天前 |
 {percentile_line}
@@ -616,7 +639,24 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
     if session["price_role"] != "prev_close":
         print(f"  [注意] 盘中/盘后生成，最新价为{session['price_label']}，非昨日收盘")
 
-    nav_calc = calculate_estimated_nav(nav_data, market_data, fund_prev_close, price_source, fx_prev_val, session, price_data.get("date"))
+    # 3e. 累计指数修正 —— 补齐「从净值基准日到报告日」之间已收盘的美股场次
+    #
+    # 净值(中国T) ↔ 纳指100(美国T)。盘前拿到的净值带有约 2 个交易日的滞宿，
+    # 期间已收盘场次的涨跌是确定性数据，必须补上。
+    _nav_date = nav_data.get("nav_date")
+    index_info = cumulative_index_ratio(_nav_date, trade_date) if _nav_date else {"ok": False, "reason": "无净值日期"}
+    if index_info.get("ok"):
+        index_ratio = index_info.get("ratio", 1.0)
+        if index_info.get("sessions"):
+            print(f"  指数修正: {index_info['from_date']} → {index_info['to_date']} "
+                  f"({(index_ratio - 1) * 100:+.3f}%, {len(index_info['sessions'])} 个已完成场次)")
+        else:
+            print("  指数修正: 无已完成场次（净值基准日即最新）")
+    else:
+        index_ratio = 1.0
+        print(f"  指数修正: 不可用（{index_info.get('reason')}）—— 估算将缺失这部分变动")
+
+    nav_calc = calculate_estimated_nav(nav_data, market_data, fund_prev_close, price_source, fx_prev_val, session, price_data.get("date"), index_ratio, index_info)
     if "error" in nav_calc:
         print(f"  计算失败: {nav_calc['error']}")
     else:
