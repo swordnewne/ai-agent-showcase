@@ -92,13 +92,11 @@ def regime_at(date_str: str) -> dict:
 
 def regime_span(date_str: str = None) -> tuple:
     """返回当前制度的时间跨度 (start, end)"""
-    from datetime import datetime as _dt
     r = regime_at(date_str or _dt.now().strftime("%Y-%m-%d"))
     return (r["start"], r["end"])
 
 
 if __name__ == "__main__":
-    from datetime import datetime
     print(f"{'日期':<14}{'制度':<12}{'限额(元/日)':<14}{'起始':<14}{'说明'}")
     print("-" * 72)
     for d in ["2024-11-15", "2024-12-15", "2025-03-01", "2025-07-15",

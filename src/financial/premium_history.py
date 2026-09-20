@@ -185,42 +185,6 @@ def multi_window_percentile(current_premium: float, windows=(30, 60, 120, 250, N
         "regime_note": regime_note,
     }
 
-
-def get_percentile(current_premium: float, days: int = 30) -> dict:
-    """计算当前溢价率的分位点"""
-    init_db()
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    cursor.execute("""
-        SELECT premium_pct FROM fund_161130_history
-        WHERE trade_date >= ? AND premium_pct IS NOT NULL
-        ORDER BY premium_pct
-    """, (cutoff,))
-    
-    rows = cursor.fetchall()
-    conn.close()
-    
-    if not rows:
-        return {"has_data": False}
-    
-    premiums = [r[0] for r in rows]
-    count = len(premiums)
-    
-    # 计算分位点
-    below = sum(1 for p in premiums if p < current_premium)
-    percentile = round(below / count * 100, 1) if count > 0 else 50
-    
-    return {
-        "has_data": True,
-        "count": count,
-        "percentile": percentile,
-        "median": premiums[count // 2] if count > 0 else None,
-        "description": f"高于{percentile}%的时间" if percentile > 50 else f"低于{100-percentile}%的时间",
-    }
-
-
 if __name__ == "__main__":
     init_db()
     print(f"数据库初始化完成: {DB_PATH}")

@@ -7,10 +7,9 @@ Python 3.6+ 兼容
 """
 
 import logging
-import json
 import os
 import time
-from typing import Optional, Dict, Any
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 

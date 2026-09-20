@@ -13,7 +13,7 @@ Python 3.6+ 兼容
 import logging
 import json
 import os
-from datetime import date, datetime
+from datetime import date
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)

@@ -5,8 +5,7 @@ AI金融信号系统 - 新闻舆情分析模块
 - 凯利公式仓位管理：半凯利保守策略
 - 13层优化→0人工审核
 """
-import json, os
-from datetime import datetime
+import json
 
 # ========== 凯利公式参数 ==========
 KELLY_CONFIG = {

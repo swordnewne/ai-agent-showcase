@@ -302,9 +302,9 @@ def queue_alert(msg: str) -> bool:
                     "msg": msg
                 }], f, ensure_ascii=False, indent=2)
             return True
-        except:
+        except Exception:
             return False
-    except:
+    except Exception:
         return False
 
 

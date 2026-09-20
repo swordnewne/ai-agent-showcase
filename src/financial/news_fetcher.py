@@ -105,7 +105,7 @@ def fetch_xinhua_single(url: str, media_name: str) -> List[Dict]:
                 href = ""
                 try:
                     href = link.css('::attr(href)').get() or ""
-                except:
+                except Exception:
                     pass
                 if 10 < len(text) < 80 and text not in [n["title"] for n in news_items]:
                     news_items.append({
@@ -149,7 +149,7 @@ def fetch_gov() -> List[Dict]:
                 href = ""
                 try:
                     href = link.css('::attr(href)').get() or ""
-                except:
+                except Exception:
                     pass
                 if 10 < len(text) < 80:
                     if text not in [n["title"] for n in news_items]:
@@ -181,7 +181,7 @@ def load_sent_alerts() -> Dict[str, str]:
         # 清理过期记录
         cutoff = (datetime.now(timezone(timedelta(hours=8))) - timedelta(hours=SENT_TTL_HOURS)).isoformat()
         return {k: v for k, v in data.items() if v > cutoff}
-    except:
+    except Exception:
         return {}
 
 
@@ -482,9 +482,9 @@ def queue_alert(msg: str) -> bool:
                     "msg": msg
                 }], f, ensure_ascii=False, indent=2)
             return True
-        except:
+        except Exception:
             return False
-    except:
+    except Exception:
         return False
 
 

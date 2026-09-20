@@ -10,7 +10,6 @@ Python 3.6+ 兼容
 """
 
 import logging
-import json
 import os
 from datetime import date
 from typing import Dict, List, Optional, Any

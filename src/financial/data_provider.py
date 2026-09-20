@@ -11,9 +11,8 @@ Python 3.6+ 兼容
 """
 
 import logging
-import json
 import requests
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -193,7 +192,6 @@ class DataProvider:
         try:
             self._init_akshare()
             import pandas as pd
-            import numpy as np
             
             df = pd.DataFrame(hist_data)
             for col in ["close", "high", "low", "volume"]:

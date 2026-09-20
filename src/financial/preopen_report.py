@@ -108,7 +108,7 @@ def fetch_news_24h() -> list:
                             "media": item.get("media_name", "新浪"),
                             "publish_time": pub_time.isoformat(),
                         })
-                except:
+                except Exception:
                     pass
     except Exception as e:
         print(f"新闻抓取失败: {e}")

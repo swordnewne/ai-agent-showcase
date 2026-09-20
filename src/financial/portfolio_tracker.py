@@ -15,7 +15,7 @@ import json
 import os
 from collections import defaultdict
 from datetime import date
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 

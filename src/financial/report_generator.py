@@ -11,8 +11,7 @@ Python 3.6+ 兼容
 """
 
 import logging
-from datetime import date
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
