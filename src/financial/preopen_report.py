@@ -414,6 +414,22 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
     
     session = nav_calc.get("session") or {}
     report_title = session.get("title", "盘前交易简报")
+
+    # 历史分位点（需要历史溢价序列，冷启动阶段数据不足时自动置空）
+    pct_info = {}
+    try:
+        _dev = nav_calc.get("deviation_pct")
+        if _dev is not None:
+            pct_info = get_percentile(_dev, days=30) or {}
+    except Exception:
+        pct_info = {}
+    if pct_info.get("has_data"):
+        percentile_line = (
+            f"| 历史分位 | {pct_info.get('description', 'N/A')}"
+            f"（近 {pct_info.get('count')} 个交易日，中位 {pct_info.get('median')}%） |\n"
+        )
+    else:
+        percentile_line = ""
     applicable = session.get("applicable", "")
     price_label = session.get("price_label", "前收盘价")
     dev_label = session.get("deviation_label", "盘前参考偏离率")
@@ -451,6 +467,7 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 | {price_label} | {nav_calc.get('prev_close', 'N/A')} ({'实时抓取' if nav_calc.get('prev_close_source') == 'sina' else '⚠️ 回退值'}) |
 | {dev_label} | **{nav_calc.get('deviation_pct', 'N/A')}%** |
 | 净值新鲜度 | {nav_calc.get('nav_stale_days', 'N/A')} 天前 |
+{percentile_line}
 
 > ⚠️ 说明: {nav_calc.get('note', '')}
 {staleness_warning}
@@ -496,6 +513,7 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 
 {chr(10).join(['- ' + r for r in risks]) if risks else '- 本报告不构成投资建议'}
 - {dev_label}基于{session.get('price_role', 'prev_close') == 'prev_close' and '昨日收盘价' or session.get('price_label', '盘中价')}计算
+- 历史分位对比的是「当日收盘/当日净值」的已实现溢价率分布，与当前估算偏离率同族但不等价（后者已将隔夜期货/汇率变动计入分母），仅作位置参考
 - 估算净值基于纳指期货，实际净值以基金公司公布为准
 """
     
