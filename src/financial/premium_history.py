@@ -119,18 +119,35 @@ def multi_window_percentile(current_premium: float, windows=(30, 60, 120, 250, N
         target = datetime.now().strftime("%Y-%m-%d")
         reg = regime_at(target)
         span = regime_span(target)
-        r_sub = [p for d, p in rows
-                 if span[0] and d >= span[0] and (span[1] is None or d <= span[1])]
-        if len(r_sub) >= 10:
-            below_r = sum(1 for x in r_sub if x < current_premium) / len(r_sub) * 100
-            out.append({
-                "label": f"同制度（{reg['label']}）",
-                "n": len(r_sub),
-                "median": round(statistics.median(r_sub), 2),
-                "mean": round(statistics.mean(r_sub), 2),
-                "below_pct": round(below_r, 1),
-                "regime": reg,
-            })
+
+        def _win(days, label, extra=None):
+            if len(days) < 10:
+                return None
+            below = sum(1 for x in days if x < current_premium) / len(days) * 100
+            d = {
+                "label": label, "n": len(days),
+                "median": round(statistics.median(days), 2),
+                "mean": round(statistics.mean(days), 2),
+                "below_pct": round(below, 1),
+            }
+            if extra:
+                d["regime"] = extra
+            return d
+
+        # 同档：当前这一档具体制度的区间（精确，但样本较短）
+        same = [p for d, p in rows
+                if span[0] and d >= span[0] and (span[1] is None or d <= span[1])]
+        e = _win(same, f"同档（自 {reg['start']}）", reg)
+        if e:
+            out.append(e)
+
+        # 同类：同一开放度类别（实质关闭 / 实质开放）的全部交易日（样本更厚）
+        kind = reg["kind"]
+        if kind:
+            same_kind = [p for d, p in rows if (regime_at(d) or {}).get("kind") == kind]
+            e2 = _win(same_kind, f"同类（{reg['label']}）", {"kind": kind})
+            if e2:
+                out.append(e2)
     except Exception:
         pass
 
