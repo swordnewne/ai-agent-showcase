@@ -35,6 +35,7 @@ from trade_calendar import get_trade_date
 from fx_history import record_fx, get_fx_prev, fx_change_ratio
 from market_session import get_session
 from us_market import cumulative_index_ratio
+from estimate_log import log_estimate, reconcile
 
 def _load_deepseek_config():
     """加载 DeepSeek 配置（环境变量或 .env 文件）"""
@@ -698,6 +699,37 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
         print(f"  汇率快照已保存")
     except Exception as e:
         print(f"  汇率快照保存失败: {e}")
+
+    # 8b. 估算值落库 —— 为了日后度量估算到底准不准
+    try:
+        _nqf, _nqp = nav_calc.get("nasdaq_futures"), nav_calc.get("nasdaq_prev")
+        log_estimate({
+            "target_date": trade_date,
+            "slot": slot,
+            "base_nav": nav_calc.get("official_nav"),
+            "base_nav_date": nav_calc.get("official_nav_date"),
+            "index_ratio": nav_calc.get("index_ratio"),
+            "index_sessions": (nav_calc.get("index_info") or {}).get("sessions"),
+            "futures_change": round(_nqf / _nqp, 6) if (_nqf and _nqp) else None,
+            "fx_change": nav_calc.get("fx_change"),
+            "estimated_nav": nav_calc.get("estimated_nav"),
+            "price": nav_calc.get("prev_close"),
+            "price_date": nav_calc.get("price_date"),
+            "broker_premium_pct": nav_calc.get("broker_premium_pct"),
+        })
+        print("  估算值已落库")
+    except Exception as e:
+        print(f"  估算值落库失败: {e}")
+
+    # 8c. 对账 —— 净值正式披露后回填真实值并计误差
+    try:
+        rc = reconcile()
+        if rc.get("ok"):
+            print(f"  对账完成: 回填 {rc.get('filled', 0)} 条真实净值")
+        else:
+            print(f"  对账跳过: {rc.get('reason')}")
+    except Exception as e:
+        print(f"  对账失败: {e}")
 
     if "error" not in nav_calc:
         try:
