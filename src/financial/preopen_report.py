@@ -1,0 +1,621 @@
+#!/usr/bin/env python3
+"""
+盘前资讯报告生成器 v1.0
+
+流程：
+1. 拉取市场数据（纳指期货/汇率/美股个股）
+2. 拉取 161130 最新净值
+3. 爬取国内新闻（24h窗口）
+4. 计算估算净值和盘前参考偏离率
+5. DeepSeek 分析 → 结构化输出
+6. 生成 Markdown 报告并推送
+
+非目标：不连接交易账户、不下单、不自动调仓
+"""
+
+import os
+import sys
+import json
+import re
+import requests
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+# 添加路径
+# 注意: parents[3] = workspace 根目录（financial -> src -> showcase -> workspace）
+WORKSPACE = os.environ.get("NIKO_WORKSPACE") or str(Path(__file__).resolve().parents[3])
+sys.path.insert(0, os.path.join(WORKSPACE, "showcase", "src", "financial"))
+sys.path.insert(0, os.path.join(WORKSPACE, "skills", "automation", "scrapling-adapter"))
+
+from market_data import fetch_all_market_data
+from nav_fetcher import fetch_nav, fetch_fund_price
+from premium_history import save_record, get_recent_stats, get_percentile
+from preopen_runs import record_run, today_str
+from trade_calendar import get_trade_date
+
+def _load_deepseek_config():
+    """加载 DeepSeek 配置（环境变量或 .env 文件）"""
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    
+    if not api_key:
+        # 尝试从 showcase/.env 读取
+        env_candidates = [
+            Path(WORKSPACE) / "showcase" / ".env",
+            Path("/root/.openclaw/workspace/showcase/.env"),
+        ]
+        for env_file in env_candidates:
+            if env_file.exists():
+                with open(env_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if line.startswith("DEEPSEEK_API_KEY="):
+                            api_key = line.split("=", 1)[1]
+                        elif line.startswith("DEEPSEEK_BASE_URL="):
+                            base_url = line.split("=", 1)[1]
+                        elif line.startswith("DEEPSEEK_MODEL="):
+                            model = line.split("=", 1)[1]
+                if api_key:
+                    break
+    
+    return api_key, base_url, model
+
+# 报告输出目录
+REPORTS_DIR = Path(WORKSPACE) / "reports" / "preopen"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# 161130 前收盘价（需手动更新或从某处抓取）
+# 第一版先硬编码，后续从深交所抓取
+FUND_161130_PREV_CLOSE = 4.545  # 昨天的收盘价
+
+
+def get_a_share_trade_date() -> str:
+    """获取当前A股交易日（走交易日历，含法定节假日休市）"""
+    return get_trade_date()
+
+
+def fetch_news_24h() -> list:
+    """抓取最近24小时新闻（复用现有爬虫，简化版）"""
+    # 第一版：直接调用现有 news_fetcher.py 的抓取函数
+    # 为简化，先用新浪API直接抓
+    news_list = []
+    
+    try:
+        # 新浪API
+        url = "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2516&num=30&r=12345"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if data.get("result", {}).get("status", {}).get("code") == 0:
+            items = data.get("result", {}).get("data", [])
+            cutoff = datetime.now() - timedelta(hours=24)
+            for item in items:
+                ctime = item.get("ctime", "")
+                try:
+                    pub_time = datetime.fromtimestamp(int(ctime))
+                    if pub_time >= cutoff:
+                        news_list.append({
+                            "title": item.get("title", ""),
+                            "intro": item.get("intro", ""),
+                            "url": item.get("url", ""),
+                            "source": "sina",
+                            "media": item.get("media_name", "新浪"),
+                            "publish_time": pub_time.isoformat(),
+                        })
+                except:
+                    pass
+    except Exception as e:
+        print(f"新闻抓取失败: {e}")
+    
+    return news_list
+
+
+def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_override: float = None, price_source: str = "hardcoded") -> dict:
+    """
+    估算 161130 盘前净值
+    
+    公式：
+    估算净值 = 最新官方净值 × (纳指期货最新 / 纳指期货昨收) × (汇率最新 / 汇率昨收)
+    
+    注意：这是近似公式，实际基金净值还受现金仓位、跟踪误差等影响
+    """
+    nav = nav_data.get("nav")
+    nav_date = nav_data.get("nav_date")
+    
+    if not nav or not nav_date:
+        return {"error": "缺少官方净值数据"}
+    
+    nq = market_data.get("nasdaq", {})
+    fx = market_data.get("usd_cny", {})
+    
+    nq_latest = nq.get("latest")
+    nq_prev = nq.get("prev_close")
+    fx_latest = fx.get("latest")
+    fx_prev = fx.get("latest")  # 新浪没有昨收，用最新代替（误差小）
+    
+    if not nq_latest or not nq_prev:
+        return {"error": "缺少纳指期货数据", "nav": nav, "nav_date": nav_date}
+    
+    # 纳指变化率
+    nq_change = nq_latest / nq_prev
+    
+    # 汇率变化（如有）
+    fx_change = 1.0
+    if fx_latest and fx_prev and fx_prev > 0:
+        fx_change = fx_latest / fx_prev
+    
+    estimated = nav * nq_change * fx_change
+
+    # 净值新鲜度（防呆：QDII 净值有滞后，过旧必须提示）
+    stale_days = None
+    try:
+        stale_days = (datetime.now() - datetime.strptime(nav_date, "%Y-%m-%d")).days
+    except Exception:
+        pass
+    
+    # 盘前参考偏离率（基于前收盘价）
+    prev_close = prev_close_override or FUND_161130_PREV_CLOSE
+    deviation = (prev_close / estimated - 1) * 100 if estimated > 0 else None
+    
+    return {
+        "official_nav": nav,
+        "official_nav_date": nav_date,
+        "nasdaq_futures": nq_latest,
+        "nasdaq_prev": nq_prev,
+        "usd_cny": fx_latest,
+        "estimated_nav": round(estimated, 4),
+        "estimated_range_low": round(estimated * 0.995, 4),
+        "estimated_range_high": round(estimated * 1.005, 4),
+        "prev_close": prev_close,
+        "prev_close_source": price_source,
+        "deviation_pct": round(deviation, 2) if deviation else None,
+        "nav_stale_days": stale_days,
+        "note": "估算值仅供参考，实际净值以基金公司公布为准",
+    }
+
+
+def build_deepseek_prompt(market_data: dict, nav_calc: dict, news_list: list) -> str:
+    """构建 DeepSeek 分析 Prompt"""
+    
+    # 美股数据摘要
+    nq = market_data.get("nasdaq", {})
+    stocks = market_data.get("stocks", {})
+    fx = market_data.get("usd_cny", {})
+    
+    stock_summary = []
+    for sym, info in stocks.items():
+        if "error" not in info:
+            stock_summary.append(f"{sym}: {info.get('latest')} ({info.get('change_pct', 0):+.2f}%)")
+    
+    # 新闻摘要（取前15条）
+    news_summary = []
+    for i, news in enumerate(news_list[:15], 1):
+        news_summary.append(f"{i}. [{news['media']}] {news['title']}")
+    
+    # 161130 数据
+    nav_text = f"""
+官方净值: {nav_calc.get('official_nav')} (日期: {nav_calc.get('official_nav_date')})
+估算净值: {nav_calc.get('estimated_nav')} (区间: {nav_calc.get('estimated_range_low')}-{nav_calc.get('estimated_range_high')})
+前收盘价: {nav_calc.get('prev_close')}
+盘前参考偏离率: {nav_calc.get('deviation_pct')}%
+说明: {nav_calc.get('note')}
+"""
+    
+    prompt = f"""你是一位盘前资讯分析师。基于以下数据，生成结构化的盘前分析报告。
+
+## 隔夜海外市场数据
+- 纳指期货: {nq.get('latest')} (昨收: {nq.get('prev_close')})
+- 美元兑人民币: {fx.get('latest')}
+- 美股七巨头:
+{chr(10).join(stock_summary)}
+
+## 161130 基金数据
+{nav_text}
+
+## 国内新闻（最近24小时）
+{chr(10).join(news_summary)}
+
+## 输出要求（严格JSON格式）
+
+```json
+{{
+    "market_summary": "隔夜海外市场一句话摘要",
+    "fund_161130": {{
+        "direction": "positive|neutral|negative|uncertain",
+        "drivers": ["影响因素1", "影响因素2"],
+        "premium_risk": "溢价率风险评估",
+        "confidence": "low|medium|high"
+    }},
+    "a_share_scenarios": [
+        {{
+            "sector": "板块名称",
+            "direction": "positive|neutral|negative|uncertain",
+            "catalysts": ["催化因素"],
+            "verification_conditions": ["开盘后验证条件"],
+            "invalidation_conditions": ["失效条件"],
+            "confidence": "low|medium|high"
+        }}
+    ],
+    "facts": [
+        {{
+            "claim": "事实陈述",
+            "source": "来源媒体"
+        }}
+    ],
+    "missing_data": ["缺失的数据项"],
+    "risk_notes": ["风险提示"]
+}}
+```
+
+规则：
+- 不要给出具体买卖建议（"买入"/"卖出"/"必然上涨"）
+- 板块影响使用"可能有利/可能承压/影响有限/需观察"
+- 所有数据必须标注来源
+- 缺失数据要诚实说明
+"""
+    
+    return prompt
+
+
+def call_deepseek(prompt: str, max_tokens: int = 6000, _retry: bool = True) -> dict:
+    """
+    调用 DeepSeek API
+
+    修复记录 (2026-09-20):
+      - max_tokens 从 2000 提到 6000。中文 JSON 输出会在 2000 撞顶
+        （completion_tokens 卡在 1980/2000），截断后解析失败 → 状态退化为 partial。
+      - 开启 JSON 模式，减少 markdown 包裹和解释文字。
+      - 遇截断/解析失败自动提高上限重试一次。
+    """
+    api_key, base_url, model = _load_deepseek_config()
+    
+    if not api_key:
+        return {"error": "DeepSeek API Key 未配置"}
+    
+    try:
+        url = f"{base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "你是一位专业的盘前资讯分析师，输出严格JSON格式。"},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"}
+        }
+        
+        r = requests.post(url, headers=headers, json=data, timeout=60)
+        r.raise_for_status()
+        
+        result = r.json()
+        choice = result["choices"][0]
+        content = choice["message"]["content"]
+        finish_reason = choice.get("finish_reason")
+        
+        # 清洗 markdown 代码块
+        content = content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        elif content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        # 截断检测（根因）
+        if finish_reason == "length":
+            usage = result.get("usage", {})
+            print(f"  [警告] 响应被截断 (completion={usage.get('completion_tokens')}/{max_tokens})")
+            if _retry:
+                print(f"  [重试] max_tokens 提升至 {max_tokens * 2}")
+                return call_deepseek(prompt, max_tokens=max_tokens * 2, _retry=False)
+            return {"error": "响应被 max_tokens 截断"}
+        
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"  [警告] JSON解析失败: {e}")
+            if _retry:
+                print(f"  [重试] 重新请求，max_tokens={max_tokens * 2}")
+                return call_deepseek(prompt, max_tokens=max_tokens * 2, _retry=False)
+            return {"error": f"JSON解析失败: {e}"}
+        
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict, nav_calc: dict, ai_result: dict, news_list: list) -> str:
+    """生成 Markdown 报告"""
+    
+    nq = market_data.get("nasdaq", {})
+    dj = market_data.get("dow", {})
+    sp = market_data.get("sp500", {})
+    fx = market_data.get("usd_cny", {})
+    stocks = market_data.get("stocks", {})
+    a_share = market_data.get("a_share", {})
+    
+    # 美股摘要
+    stock_lines = []
+    for sym, info in stocks.items():
+        if "error" not in info:
+            stock_lines.append(f"- {sym}: {info.get('latest')} ({info.get('change_pct', 0):+.2f}%)")
+    
+    # A股前一日数据
+    a_shanghai = a_share.get("shanghai", {})
+    a_shenzhen = a_share.get("shenzhen", {})
+    
+    # 新闻列表（取前10条）
+    news_lines = []
+    for i, news in enumerate(news_list[:10], 1):
+        news_lines.append(f"{i}. [{news['media']}] {news['title']}")
+    
+    # 数据新鲜度防呆
+    stale_days = nav_calc.get("nav_stale_days")
+    staleness_warning = ""
+    if stale_days is not None and stale_days > 5:
+        staleness_warning = (
+            f"\n> 🚨 **数据陈旧提示**：最新净值日期距今 **{stale_days} 天**，"
+            f"估算净值可能已明显偏离实际，请谨慎参考。\n"
+        )
+
+    # AI 分析结果
+    fund_161130 = ai_result.get("fund_161130", {})
+    scenarios = ai_result.get("a_share_scenarios", [])
+    facts = ai_result.get("facts", [])
+    missing = ai_result.get("missing_data", [])
+    risks = ai_result.get("risk_notes", [])
+    
+    # 板块情景
+    scenario_lines = []
+    for s in scenarios:
+        scenario_lines.append(f"""
+**{s.get('sector', '未知板块')}** — {s.get('direction', 'uncertain')}
+- 催化: {', '.join(s.get('catalysts', []))}
+- 验证: {', '.join(s.get('verification_conditions', []))}
+- 失效: {', '.join(s.get('invalidation_conditions', []))}
+- 置信度: {s.get('confidence', 'medium')}
+""")
+    
+    report = f"""# 盘前交易简报 ({trade_date})
+
+> 报告生成时间: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')}
+> 数据完整度: {'完整' if not missing else '部分缺失'}
+
+---
+
+## 一、隔夜海外市场
+
+| 指标 | 数值 |
+|------|------|
+| 纳指期货 | {nq.get('latest', 'N/A')} (昨收: {nq.get('prev_close', 'N/A')}) |
+| 道指期货 | {dj.get('latest', 'N/A')} (昨收: {dj.get('prev_close', 'N/A')}) |
+| 标普期货 | {sp.get('latest', 'N/A')} (昨收: {sp.get('prev_close', 'N/A')}) |
+| 美元兑人民币 | {fx.get('latest', 'N/A')} |
+
+### 美股七巨头
+{chr(10).join(stock_lines) if stock_lines else '- 数据缺失'}
+
+---
+
+## 二、161130 基金分析
+
+| 指标 | 数值 |
+|------|------|
+| 最新官方净值 | {nav_calc.get('official_nav', 'N/A')} ({nav_calc.get('official_nav_date', 'N/A')}) |
+| 盘前估算净值 | **{nav_calc.get('estimated_nav', 'N/A')}** |
+| 估算区间 | {nav_calc.get('estimated_range_low', 'N/A')} - {nav_calc.get('estimated_range_high', 'N/A')} |
+| 前收盘价 | {nav_calc.get('prev_close', 'N/A')} ({'实时抓取' if nav_calc.get('prev_close_source') == 'sina' else '⚠️ 回退值'}) |
+| 盘前参考偏离率 | **{nav_calc.get('deviation_pct', 'N/A')}%** |
+| 净值新鲜度 | {nav_calc.get('nav_stale_days', 'N/A')} 天前 |
+
+> ⚠️ 说明: {nav_calc.get('note', '')}
+{staleness_warning}
+
+### AI分析
+- 方向: {fund_161130.get('direction', 'uncertain')}
+- 驱动因素: {', '.join(fund_161130.get('drivers', []))}
+- 溢价风险: {fund_161130.get('premium_risk', 'N/A')}
+- 置信度: {fund_161130.get('confidence', 'medium')}
+
+---
+
+## 三、A股前一日收盘
+
+| 指数 | 收盘 | 涨跌 |
+|------|------|------|
+| 上证指数 | {a_shanghai.get('prev_close', 'N/A')} | {a_shanghai.get('latest', 'N/A')} |
+| 深证成指 | {a_shenzhen.get('prev_close', 'N/A')} | {a_shenzhen.get('latest', 'N/A')} |
+
+> 注：显示的是前一交易日收盘数据，用于判断大盘趋势
+
+---
+
+## 四、A股板块情景
+
+{chr(10).join(scenario_lines) if scenario_lines else '- 暂无分析'}
+
+---
+
+## 五、国内新闻摘要
+
+{chr(10).join(news_lines) if news_lines else '- 暂无新闻'}
+
+---
+
+## 六、数据缺失项
+
+{chr(10).join(['- ' + m for m in missing]) if missing else '- 无'}
+
+---
+
+## 七、风险提示
+
+{chr(10).join(['- ' + r for r in risks]) if risks else '- 本报告不构成投资建议'}
+- 盘前参考偏离率使用昨日收盘价计算，非今日可成交溢价率
+- 估算净值基于纳指期货，实际净值以基金公司公布为准
+"""
+    
+    return report
+
+
+def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
+    """
+    主流程
+
+    Returns:
+        {"status": complete|partial|failed|skipped, "report_path": path|None, "reason": str|None}
+    """
+    print("=" * 50)
+    print("盘前资讯报告生成器 v1.0")
+    print("=" * 50)
+    
+    # 1. 判断交易日
+    if ignore_calendar:
+        trade_date = today_str()
+        print(f"\n交易日(忽略日历): {trade_date}")
+    else:
+        trade_date = get_a_share_trade_date()
+        if not trade_date:
+            print("今日非A股交易日，跳过")
+            return {"status": "skipped", "report_path": None, "reason": "非A股交易日"}
+        print(f"\n交易日: {trade_date}")
+    
+    # 2. 拉取市场数据
+    print("\n[1/5] 拉取市场数据...")
+    market_data = fetch_all_market_data()
+    print(f"  纳指期货: {market_data['nasdaq'].get('latest', '失败')}")
+    print(f"  汇率: {market_data['usd_cny'].get('latest', '失败')}")
+    
+    # 3. 拉取 161130 净值
+    print("\n[2/5] 拉取 161130 净值...")
+    nav_data = fetch_nav()
+    print(f"  净值: {nav_data.get('nav')} ({nav_data.get('nav_date')})")
+    
+    # 4. 计算估算净值
+    print("\n[3/5] 计算估算净值...")
+    # 3b. 拉取 161130 场内价格（前收盘价，用于偏离率）
+    print("\n[2.5/5] 拉取 161130 场内价格...")
+    price_data = fetch_fund_price()
+    if "error" in price_data or not price_data.get("latest"):
+        fund_prev_close = FUND_161130_PREV_CLOSE
+        price_source = "fallback"
+        print(f"  [警告] 价格抓取失败，回退硬编码 {FUND_161130_PREV_CLOSE}: {price_data.get('error')}")
+    else:
+        fund_prev_close = price_data["latest"]
+        price_source = "sina"
+        print(f"  最新价: {fund_prev_close} (昨收 {price_data.get('prev_close')}, {price_data.get('date')})")
+
+    nav_calc = calculate_estimated_nav(nav_data, market_data, fund_prev_close, price_source)
+    if "error" in nav_calc:
+        print(f"  计算失败: {nav_calc['error']}")
+    else:
+        print(f"  估算净值: {nav_calc['estimated_nav']}")
+        print(f"  参考偏离率: {nav_calc['deviation_pct']}%")
+    
+    # 5. 抓取新闻
+    print("\n[4/5] 抓取新闻...")
+    news_list = fetch_news_24h()
+    print(f"  抓取到 {len(news_list)} 条新闻")
+    
+    # 6. DeepSeek 分析
+    print("\n[5/5] DeepSeek 分析...")
+    ai_result = {}
+    if news_list and "error" not in nav_calc:
+        prompt = build_deepseek_prompt(market_data, nav_calc, news_list)
+        ai_result = call_deepseek(prompt)
+        if "error" in ai_result:
+            print(f"  DeepSeek 失败: {ai_result['error']}")
+        else:
+            print(f"  分析完成")
+    else:
+        print("  跳过（缺少数据）")
+        ai_result = {"error": "缺少新闻或净值数据"}
+    
+    # 7. 生成报告
+    print("\n[生成报告]...")
+    report = generate_markdown_report(trade_date, market_data, nav_data, nav_calc, ai_result, news_list)
+    
+    # 保存文件
+    report_path = REPORTS_DIR / f"preopen_{trade_date}.md"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    print(f"  报告已保存: {report_path}")
+    
+    # 8. 保存历史溢价数据
+    if "error" not in nav_calc:
+        try:
+            save_record(
+                trade_date=trade_date,
+                nav=nav_data.get("nav"),
+                price=fund_prev_close,
+                premium_pct=nav_calc.get("deviation_pct"),
+                nav_date=nav_data.get("nav_date")
+            )
+            print(f"  历史数据已保存")
+        except Exception as e:
+            print(f"  历史数据保存失败: {e}")
+    
+    # 9. 状态判定（严格幂等依据：仅 complete 算“今日已执行”）
+    has_market = "error" not in market_data.get("nasdaq", {})
+    has_nav = "error" not in nav_calc
+    has_news = len(news_list) > 0
+    has_ai = bool(ai_result) and "error" not in ai_result
+
+    if has_market and has_nav and has_news and has_ai:
+        status = "complete"
+    elif has_market or has_nav:
+        status = "partial"
+    else:
+        status = "failed"
+
+    reason = None
+    missing_parts = []
+    if not has_market:
+        missing_parts.append("市场数据")
+    if not has_nav:
+        missing_parts.append("161130净值")
+    if not has_news:
+        missing_parts.append("新闻")
+    if not has_ai:
+        missing_parts.append("AI分析")
+    if missing_parts:
+        reason = "缺失: " + "、".join(missing_parts)
+
+    # 10. 落库（幂等标记）
+    try:
+        record_run(
+            run_date=trade_date,
+            run_slot=slot,
+            status=status,
+            report_path=report_path,
+        )
+        print(f"\n[状态] {status} (slot={slot})")
+        if reason:
+            print(f"  {reason}")
+    except Exception as e:
+        print(f"\n[告警] 运行记录写入失败: {e}")
+
+    # 11. 输出摘要到控制台（供定时任务捕获）
+    print("\n" + "=" * 50)
+    print("报告摘要")
+    print("=" * 50)
+
+    fund = ai_result.get("fund_161130", {})
+    print(f"状态: {status}")
+    print(f"\n161130: {fund.get('direction', 'N/A')}")
+    print(f"估算净值: {nav_calc.get('estimated_nav', 'N/A')}")
+    print(f"参考偏离率: {nav_calc.get('deviation_pct', 'N/A')}%")
+    print(f"\n完整报告: {report_path}")
+
+    return {"status": status, "report_path": str(report_path), "reason": reason}
+
+
+if __name__ == "__main__":
+    run()
