@@ -1,16 +1,16 @@
 # Graph Report - showcase  (2026-07-28)
 
 ## Corpus Check
-- 70 files · ~48,854 words
+- 70 files · ~48,968 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 588 nodes · 950 edges · 44 communities (41 shown, 3 thin omitted)
+- 591 nodes · 956 edges · 44 communities (41 shown, 3 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 8 edges (avg confidence: 0.54)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `22f7ae9b`
+- Built from commit: `f1bdba21`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -90,7 +90,7 @@
 
 ### Community 0 - "launcher.py"
 Cohesion: 0.06
-Nodes (24): main(), # TODO: 接入企业微信推送, # TODO: 实现单股测试, calculate_position(), get_kelly_calculator(), KellyPositionCalculator, Any, 凯利公式仓位计算器          凯利公式: f = (p * b - q) / b     其中:         p = 胜率 (如 0.6) (+16 more)
+Nodes (22): main(), # TODO: 接入企业微信推送, # TODO: 实现单股测试, calculate_position(), get_kelly_calculator(), KellyPositionCalculator, Any, 凯利公式仓位计算器          凯利公式: f = (p * b - q) / b     其中:         p = 胜率 (如 0.6) (+14 more)
 
 ### Community 1 - "signal_pipeline.py"
 Cohesion: 0.10
@@ -113,8 +113,8 @@ Cohesion: 0.14
 Nodes (9): Any, 验证单个信号的结果                  Args:             signal_id: 信号ID             future_, 批量验证所有待验证信号                  由定时任务调用（如每天收盘后）, 信号追踪器          流程：     1. AI分析 → 生成 DecisionSignal（含目标价/止损价）     2. 保存到数据库     3, 获取未来N天行情数据                  TODO: 接入akshare或本地数据库, 统计AI信号准确率                  Returns:             {                 "total_signals, 获取AI当前信任权重（0.0-1.0）                  基于近期信号准确率动态调整：         - 胜率>60% → 权重1.0, 创建交易信号                  Args:             stock_code: 股票代码             stock_nam (+1 more)
 
 ### Community 6 - "StockAnalyzer"
-Cohesion: 0.14
-Nodes (10): Any, 趋势评分（0-20）                  评分标准：         - MA5>MA10>MA20 多头排列: +8         - 价格在, 估值评分（0-15）                  评分标准：         - PE分位<30%（低估）: +5         - PE分位30-70, 个股100分综合评分器          六维度评分：     - 趋势得分 (20分): MA多头排列、价格位置     - 估值得分 (15分): PE/P, 资金评分（0-15）                  评分标准：         - 近5日主力资金净流入: +5         - 成交量较20日均量放大, 基本面评分（0-20）                  评分标准：         - 营收增速>20%: +5         - 净利润增速>20%: +, 技术面评分（0-20）                  评分标准：         - MACD金叉或红柱扩大: +5         - RSI在40-70, 情绪评分（0-10）                  评分标准：         - 新闻情绪正面: +4         - 舆情热度适中: +3 (+2 more)
+Cohesion: 0.13
+Nodes (12): get_analyzer(), Any, quick_analyze(), 趋势评分（0-20）                  评分标准：         - MA5>MA10>MA20 多头排列: +8         - 价格在, 估值评分（0-15）                  评分标准：         - PE分位<30%（低估）: +5         - PE分位30-70, 个股100分综合评分器          六维度评分：     - 趋势得分 (20分): MA多头排列、价格位置     - 估值得分 (15分): PE/P, 资金评分（0-15）                  评分标准：         - 近5日主力资金净流入: +5         - 成交量较20日均量放大, 基本面评分（0-20）                  评分标准：         - 营收增速>20%: +5         - 净利润增速>20%: + (+4 more)
 
 ### Community 7 - "AgentOrchestrator"
 Cohesion: 0.13
@@ -213,8 +213,8 @@ Cohesion: 0.43
 Nodes (7): check_last_conversation(), extract_correction_pattern(), is_correction(), main(), 检查最近对话中的纠正（用于 HEARTBEAT）, 从纠正中提取旧做法 vs 新做法          尝试解析：       "不要 A，应该是 B" → 旧=A, 新=B       "不对，A 应该是 B", record_correction()
 
 ### Community 31 - "fetch_joinquant_full.py"
-Cohesion: 0.48
-Nodes (5): fetch_api(), main(), parse_logs(), parse_positions(), save_to_db()
+Cohesion: 0.36
+Nodes (9): auto_relogin(), _do_request(), fetch_api(), _load_cookies(), main(), parse_logs(), parse_positions(), 获取API数据，支持Cookie失效自动重登 (+1 more)
 
 ### Community 32 - "joinquant_push_module.py"
 Cohesion: 0.43
@@ -259,9 +259,7 @@ _Questions this graph is uniquely positioned to answer:_
 - **Why does `PortfolioTracker` connect `PortfolioTracker` to `launcher.py`, `DataProvider`?**
   _High betweenness centrality (0.028) - this node is a cross-community bridge._
 - **Why does `SignalTracker` connect `SignalTracker` to `launcher.py`?**
-  _High betweenness centrality (0.024) - this node is a cross-community bridge._
-- **Why does `StockAnalyzer` connect `StockAnalyzer` to `launcher.py`?**
-  _High betweenness centrality (0.019) - this node is a cross-community bridge._
+  _High betweenness centrality (0.023) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `PortfolioTracker` (e.g. with `TradingSystemLauncher` and `DataProvider`) actually correct?**
   _`PortfolioTracker` has 2 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 2 inferred relationships involving `DataProvider` (e.g. with `PortfolioOversellError` and `PortfolioTracker`) actually correct?**
@@ -269,4 +267,6 @@ _Questions this graph is uniquely positioned to answer:_
 - **What connects `daily_portfolio_update.sh script`, `setup_cron.sh script` to the rest of the system?**
   _2 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `launcher.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.06033182503770739 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06292517006802721 - nodes in this community are weakly interconnected._
+- **Should `signal_pipeline.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.10160427807486631 - nodes in this community are weakly interconnected._

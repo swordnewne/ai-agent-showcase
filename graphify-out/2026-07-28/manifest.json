@@ -95,8 +95,8 @@
     "semantic_hash": "a09f638759ffb25768876e2dd124c2cc"
   },
   "scripts/fetch_joinquant_full.py": {
-    "mtime": 1785242533.4787016,
-    "ast_hash": "0e3b571467c66917a57430b23a5d7746",
+    "mtime": 1785241547.1106887,
+    "ast_hash": "7f85a9533b34333b28b319924d6efe72",
     "semantic_hash": ""
   },
   "scripts/fetch_joinquant_v2.py": {
@@ -115,8 +115,8 @@
     "semantic_hash": "eb252f1458f53d16e448f8c7f05ff611"
   },
   "scripts/jq_login_guard.py": {
-    "mtime": 1785242533.4787016,
-    "ast_hash": "53cfc5f6e52f7c172f65e2bd5e4dbe61",
+    "mtime": 1785241526.919687,
+    "ast_hash": "3f1cc0332343cb1a5f6256b0ad455ea9",
     "semantic_hash": ""
   },
   "scripts/signal_comparison.py": {

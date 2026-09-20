@@ -16,15 +16,21 @@ from typing import List, Optional, Dict, Tuple
 
 def _find_workspace() -> str:
     """Find project root by looking for marker files"""
-    path = os.path.dirname(os.path.abspath(__file__))
+    # This script is in showcase/scripts/ so go up 3 levels
+    script_path = os.path.dirname(os.path.abspath(__file__))
+    # Go up: scripts/ -> showcase/ -> workspace/
+    path = os.path.dirname(os.path.dirname(script_path))
+    if os.path.exists(os.path.join(path, 'AGENTS.md')) or os.path.exists(os.path.join(path, 'SOUL.md')):
+        return path
+    # Fallback: walk up from script location
+    path = script_path
     while path != '/':
         if os.path.exists(os.path.join(path, 'AGENTS.md')) or os.path.exists(os.path.join(path, 'SOUL.md')):
             return path
         path = os.path.dirname(path)
-    # Fallback: script-relative (3 levels up for scripts/ path)
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return '/root/.openclaw/workspace'
 
-DB_PATH = os.path.join(_find_workspace(), "data", "finance.db")
+DB_PATH = os.path.join(_find_workspace(), "showcase", "data", "finance.db")
 
 # 2026 年中国法定节假日（需每年更新）
 HOLIDAYS = {

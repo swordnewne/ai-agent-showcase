@@ -1,13 +1,13 @@
 {
   ".alerts/finance_signals.json": {
-    "mtime": 1785221745.560353,
-    "ast_hash": "ce1766e15e864c78983c4384b7086a46",
-    "semantic_hash": ""
+    "mtime": 1784292719.6579027,
+    "ast_hash": "a6253aff935c3a7361a06ff959188c5d",
+    "semantic_hash": "a6253aff935c3a7361a06ff959188c5d"
   },
   ".alerts/pending_alerts.json": {
-    "mtime": 1785222380.3780484,
-    "ast_hash": "a7c1dbca01eac19b8825bb616c8cf851",
-    "semantic_hash": ""
+    "mtime": 1784292719.6579027,
+    "ast_hash": "c9fa25cd4146e3d165368c12d044ecf4",
+    "semantic_hash": "c9fa25cd4146e3d165368c12d044ecf4"
   },
   ".alerts/pending_wechat.json": {
     "mtime": 1784292719.6589026,
@@ -70,9 +70,9 @@
     "semantic_hash": "e28f33cce8d850580faf5dbad68f49f0"
   },
   "scripts/daily_signal_review.py": {
-    "mtime": 1784531848.136234,
-    "ast_hash": "d169e10041f6c2aaadc87c1fbeee28ca",
-    "semantic_hash": ""
+    "mtime": 1784292719.6599026,
+    "ast_hash": "3b4a92f373846780ee6c54a4cacbe0f9",
+    "semantic_hash": "3b4a92f373846780ee6c54a4cacbe0f9"
   },
   "scripts/fetch_joinquant.py": {
     "mtime": 1784292719.6599026,
@@ -95,9 +95,9 @@
     "semantic_hash": "a09f638759ffb25768876e2dd124c2cc"
   },
   "scripts/fetch_joinquant_full.py": {
-    "mtime": 1785242533.4787016,
+    "mtime": 1784292719.6609027,
     "ast_hash": "0e3b571467c66917a57430b23a5d7746",
-    "semantic_hash": ""
+    "semantic_hash": "0e3b571467c66917a57430b23a5d7746"
   },
   "scripts/fetch_joinquant_v2.py": {
     "mtime": 1784292719.6609027,
@@ -115,9 +115,9 @@
     "semantic_hash": "eb252f1458f53d16e448f8c7f05ff611"
   },
   "scripts/jq_login_guard.py": {
-    "mtime": 1785242533.4787016,
+    "mtime": 1784292719.6609027,
     "ast_hash": "53cfc5f6e52f7c172f65e2bd5e4dbe61",
-    "semantic_hash": ""
+    "semantic_hash": "53cfc5f6e52f7c172f65e2bd5e4dbe61"
   },
   "scripts/signal_comparison.py": {
     "mtime": 1784292719.6609027,
@@ -215,9 +215,9 @@
     "semantic_hash": "0aba39fd24ca6e2920f599db4c6d5db3"
   },
   "src/financial/news_fetcher.py": {
-    "mtime": 1784812737.4323514,
-    "ast_hash": "5d409abf2953c0bfce621b344184690f",
-    "semantic_hash": ""
+    "mtime": 1784292719.6619027,
+    "ast_hash": "45c0b66c7dd0d4ce396e92e82b6c1ff1",
+    "semantic_hash": "45c0b66c7dd0d4ce396e92e82b6c1ff1"
   },
   "src/financial/portfolio_tracker.py": {
     "mtime": 1784292719.6629026,
