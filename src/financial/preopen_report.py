@@ -32,6 +32,7 @@ from nav_fetcher import fetch_nav, fetch_fund_price
 from premium_history import save_record, get_recent_stats, get_percentile
 from preopen_runs import record_run, today_str
 from trade_calendar import get_trade_date
+from fx_history import record_fx, get_fx_prev, fx_change_ratio
 
 def _load_deepseek_config():
     """加载 DeepSeek 配置（环境变量或 .env 文件）"""
@@ -112,7 +113,7 @@ def fetch_news_24h() -> list:
     return news_list
 
 
-def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_override: float = None, price_source: str = "hardcoded") -> dict:
+def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_override: float = None, price_source: str = "hardcoded", fx_prev_override: float = None) -> dict:
     """
     估算 161130 盘前净值
     
@@ -133,7 +134,7 @@ def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_overri
     nq_latest = nq.get("latest")
     nq_prev = nq.get("prev_close")
     fx_latest = fx.get("latest")
-    fx_prev = fx.get("latest")  # 新浪没有昨收，用最新代替（误差小）
+    fx_prev = fx_prev_override  # 来自 fx_history 积累，不猜新浪字段布局
     
     if not nq_latest or not nq_prev:
         return {"error": "缺少纳指期货数据", "nav": nav, "nav_date": nav_date}
@@ -143,8 +144,12 @@ def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_overri
     
     # 汇率变化（如有）
     fx_change = 1.0
-    if fx_latest and fx_prev and fx_prev > 0:
-        fx_change = fx_latest / fx_prev
+    fx_source = "unavailable"
+    if fx_latest and fx_prev:
+        _ratio = fx_change_ratio(fx_latest, fx_prev)
+        if _ratio is not None:
+            fx_change = _ratio
+            fx_source = "history"
     
     estimated = nav * nq_change * fx_change
 
@@ -165,6 +170,9 @@ def calculate_estimated_nav(nav_data: dict, market_data: dict, prev_close_overri
         "nasdaq_futures": nq_latest,
         "nasdaq_prev": nq_prev,
         "usd_cny": fx_latest,
+        "fx_prev": fx_prev,
+        "fx_change": round(fx_change, 6),
+        "fx_source": fx_source,
         "estimated_nav": round(estimated, 4),
         "estimated_range_low": round(estimated * 0.995, 4),
         "estimated_range_high": round(estimated * 1.005, 4),
@@ -350,6 +358,25 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
     # A股前一日数据
     a_shanghai = a_share.get("shanghai", {})
     a_shenzhen = a_share.get("shenzhen", {})
+
+    def _index_row(info: dict):
+        """返回 (收盘点位, 涨跌幅字符串)"""
+        close = info.get("latest")
+        prev = info.get("prev_close")
+        try:
+            close_f = float(close)
+        except (TypeError, ValueError):
+            return "N/A", "N/A"
+        try:
+            prev_f = float(prev)
+            if prev_f > 0:
+                return f"{close_f:.2f}", f"{(close_f / prev_f - 1) * 100:+.2f}%"
+        except (TypeError, ValueError):
+            pass
+        return f"{close_f:.2f}", "N/A"
+
+    sh_close, sh_pct = _index_row(a_shanghai)
+    sz_close, sz_pct = _index_row(a_shenzhen)
     
     # 新闻列表（取前10条）
     news_lines = []
@@ -430,8 +457,8 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 
 | 指数 | 收盘 | 涨跌 |
 |------|------|------|
-| 上证指数 | {a_shanghai.get('prev_close', 'N/A')} | {a_shanghai.get('latest', 'N/A')} |
-| 深证成指 | {a_shenzhen.get('prev_close', 'N/A')} | {a_shenzhen.get('latest', 'N/A')} |
+| 上证指数 | {sh_close} | {sh_pct} |
+| 深证成指 | {sz_close} | {sz_pct} |
 
 > 注：显示的是前一交易日收盘数据，用于判断大盘趋势
 
@@ -512,7 +539,14 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
         price_source = "sina"
         print(f"  最新价: {fund_prev_close} (昨收 {price_data.get('prev_close')}, {price_data.get('date')})")
 
-    nav_calc = calculate_estimated_nav(nav_data, market_data, fund_prev_close, price_source)
+    # 3c. 取汇率前值（自行积累，不猜字段布局）
+    fx_prev_val, fx_prev_date = get_fx_prev(trade_date)
+    if fx_prev_val:
+        print(f"  汇率前值: {fx_prev_val} ({fx_prev_date})")
+    else:
+        print("  汇率前值: 暂无历史（首次运行，本次不计汇率变动）")
+
+    nav_calc = calculate_estimated_nav(nav_data, market_data, fund_prev_close, price_source, fx_prev_val)
     if "error" in nav_calc:
         print(f"  计算失败: {nav_calc['error']}")
     else:
@@ -548,7 +582,13 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
         f.write(report)
     print(f"  报告已保存: {report_path}")
     
-    # 8. 保存历史溢价数据
+    # 8. 保存历史溢价数据 + 汇率快照
+    try:
+        record_fx(trade_date, market_data.get("usd_cny", {}).get("latest"))
+        print(f"  汇率快照已保存")
+    except Exception as e:
+        print(f"  汇率快照保存失败: {e}")
+
     if "error" not in nav_calc:
         try:
             save_record(
@@ -575,6 +615,18 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
     else:
         status = "failed"
 
+    # 数据质量门槛：四项齐全也不代表数据可信，以下情况强制降级
+    quality_issues = []
+    if nav_calc.get("prev_close_source") == "fallback":
+        quality_issues.append("前收盘价回退到硬编码值")
+    if nav_calc.get("fx_source") == "unavailable":
+        quality_issues.append("汇率前值缺失")
+    _stale = nav_calc.get("nav_stale_days")
+    if _stale is not None and _stale > 5:
+        quality_issues.append(f"净值陈旧 {_stale} 天")
+    if status == "complete" and quality_issues:
+        status = "partial"
+
     reason = None
     missing_parts = []
     if not has_market:
@@ -587,6 +639,9 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
         missing_parts.append("AI分析")
     if missing_parts:
         reason = "缺失: " + "、".join(missing_parts)
+    if quality_issues:
+        _q = "质量: " + "、".join(quality_issues)
+        reason = f"{reason} | {_q}" if reason else _q
 
     # 10. 落库（幂等标记）
     try:
