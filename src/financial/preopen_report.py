@@ -291,6 +291,10 @@ def build_deepseek_prompt(market_data: dict, nav_calc: dict, news_list: list) ->
 - 板块影响使用"可能有利/可能承压/影响有限/需观察"
 - 所有数据必须标注来源
 - 缺失数据要诚实说明
+- 指数口径：估算与「指数修正」统一采用**纳斯达克100（.NDX）**为基准。
+  若基金公司未正式披露跟踪指数，missing_data 中请写
+  「跟踪指数未经基金公司披露确认（估算按纳指100口径）」，
+  **不要**把跟踪指数整体列为缺失——那与报告实际采用的口径自相矛盾
 """
     
     return prompt
@@ -501,6 +505,16 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
     price_label = session.get("price_label", "前收盘价")
     dev_label = session.get("deviation_label", "盘前参考偏离率")
 
+    # 纳指100 现货收盘（隔夜已完成场次）
+    # 此前现货数据只用于计算「指数修正」，未在报告里呈现——导致隔夜段只有期货，
+    # 读者看不到当晚真实收盘价（2026-09-21 修正）。复用 _index_row，与 A 股指数同口径。
+    _ndx_to = _ii.get("to_close")
+    if _ii.get("ok") and _ndx_to is not None and _ii.get("to_date") != _ii.get("from_date"):
+        ndx_close, ndx_pct = _index_row({"latest": _ndx_to, "prev_close": _ii.get("from_close")})
+        ndx_note = f"（{_ii.get('to_date')} 收盘场次）"
+    else:
+        ndx_close, ndx_pct, ndx_note = "N/A", "N/A", ""
+
     report = f"""# {report_title} ({trade_date})
 
 > 报告生成时间: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')}
@@ -514,6 +528,7 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 
 | 指标 | 数值 |
 |------|------|
+| **纳指100 现货收盘** | **{ndx_close}** ({ndx_pct}) {ndx_note} |
 | 纳指期货 | {nq.get('latest', 'N/A')} (昨收: {nq.get('prev_close', 'N/A')}) |
 | 道指期货 | {dj.get('latest', 'N/A')} (昨收: {dj.get('prev_close', 'N/A')}) |
 | 标普期货 | {sp.get('latest', 'N/A')} (昨收: {sp.get('prev_close', 'N/A')}) |
