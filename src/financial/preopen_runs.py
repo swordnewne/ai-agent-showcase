@@ -10,6 +10,7 @@
 
 import sqlite3
 import os
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -56,6 +57,21 @@ def record_run(run_date: str, run_slot: str, status: str, report_path=None) -> N
     )
     conn.commit()
     conn.close()
+    if os.environ.get("NIKO_FINANCE_PG_SHADOW_WRITE") == "1":
+        try:
+            sys.path.insert(0, os.environ.get("NIKO_FINANCE_ADAPTER_PATH", "/root/.openclaw/workspace/finance-adapter"))
+            from preopen_shadow_adapter import write_shadow_run
+            write_shadow_run(
+                dsn_file=os.environ.get("NIKO_FINANCE_PG_DSN_FILE", "/root/.config/niko/finance-shadow.dsn"),
+                run_date=run_date,
+                run_slot=run_slot,
+                status=status,
+                report_path=str(report_path) if report_path else None,
+            )
+        except Exception as exc:
+            # SQLite remains authoritative during the shadow phase; do not
+            # turn a PostgreSQL probe failure into a missing report.
+            print(f"[告警] PostgreSQL 影子运行记录失败: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def mark_delivery(run_date: str, delivery_status: str) -> None:

@@ -29,17 +29,19 @@ sys.path.insert(0, os.path.join(WORKSPACE, "skills", "automation", "scrapling-ad
 from market_data import fetch_all_market_data
 from nav_fetcher import fetch_nav, fetch_fund_price
 from premium_history import save_record, multi_window_percentile
-from preopen_runs import record_run, today_str
+from preopen_runs import record_run, today_str, mark_delivery
 from trade_calendar import get_trade_date
 from fx_history import record_fx, get_fx_prev, fx_change_ratio
 from market_session import get_session
 from us_market import cumulative_index_ratio
 from estimate_log import log_estimate, reconcile
 from subscription_watch import watch_line as sub_watch_line
+from rising_streak import fetch_candidates, render_section
 
 def _load_deepseek_config():
-    """加载 DeepSeek 配置（环境变量或 .env 文件）"""
+    """加载 DeepSeek 配置（环境变量或 .env 文件），含备用 key"""
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    backup_key = os.environ.get("DEEPSEEK_API_KEY_BACKUP", "")
     base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     
@@ -56,7 +58,9 @@ def _load_deepseek_config():
                         line = line.strip()
                         if not line or line.startswith("#"):
                             continue
-                        if line.startswith("DEEPSEEK_API_KEY="):
+                        if line.startswith("DEEPSEEK_API_KEY_BACKUP="):
+                            backup_key = line.split("=", 1)[1]
+                        elif line.startswith("DEEPSEEK_API_KEY="):
                             api_key = line.split("=", 1)[1]
                         elif line.startswith("DEEPSEEK_BASE_URL="):
                             base_url = line.split("=", 1)[1]
@@ -65,7 +69,7 @@ def _load_deepseek_config():
                 if api_key:
                     break
     
-    return api_key, base_url, model
+    return api_key, base_url, model, backup_key
 
 # 报告输出目录
 REPORTS_DIR = Path(WORKSPACE) / "reports" / "preopen"
@@ -310,69 +314,83 @@ def call_deepseek(prompt: str, max_tokens: int = 6000, _retry: bool = True) -> d
       - 开启 JSON 模式，减少 markdown 包裹和解释文字。
       - 遇截断/解析失败自动提高上限重试一次。
     """
-    api_key, base_url, model = _load_deepseek_config()
+    api_key, base_url, model, backup_key = _load_deepseek_config()
     
     if not api_key:
         return {"error": "DeepSeek API Key 未配置"}
     
-    try:
-        url = f"{base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "你是一位专业的盘前资讯分析师，输出严格JSON格式。"},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"}
-        }
-        
-        r = requests.post(url, headers=headers, json=data, timeout=60)
-        r.raise_for_status()
-        
-        result = r.json()
-        choice = result["choices"][0]
-        content = choice["message"]["content"]
-        finish_reason = choice.get("finish_reason")
-        
-        # 清洗 markdown 代码块
-        content = content.strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        elif content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-        
-        # 截断检测（根因）
-        if finish_reason == "length":
-            usage = result.get("usage", {})
-            print(f"  [警告] 响应被截断 (completion={usage.get('completion_tokens')}/{max_tokens})")
-            if _retry:
-                print(f"  [重试] max_tokens 提升至 {max_tokens * 2}")
-                return call_deepseek(prompt, max_tokens=max_tokens * 2, _retry=False)
-            return {"error": "响应被 max_tokens 截断"}
-        
+    def _do_request(key: str):
+        """用指定 key 发起一次请求，返回 (result, auth_error)"""
         try:
-            return json.loads(content)
-        except json.JSONDecodeError as e:
-            print(f"  [警告] JSON解析失败: {e}")
-            if _retry:
-                print(f"  [重试] 重新请求，max_tokens={max_tokens * 2}")
-                return call_deepseek(prompt, max_tokens=max_tokens * 2, _retry=False)
-            return {"error": f"JSON解析失败: {e}"}
+            url = f"{base_url}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "你是一位专业的盘前资讯分析师，输出严格JSON格式。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"}
+            }
+            
+            r = requests.post(url, headers=headers, json=data, timeout=60)
+            r.raise_for_status()
+            
+            result = r.json()
+            choice = result["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason")
+            
+            # 清洗 markdown 代码块
+            content = content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            elif content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+            
+            # 截断检测（根因）
+            if finish_reason == "length":
+                usage = result.get("usage", {})
+                print(f"  [警告] 响应被截断 (completion={usage.get('completion_tokens')}/{max_tokens})")
+                if _retry:
+                    print(f"  [重试] max_tokens 提升至 {max_tokens * 2}")
+                    return call_deepseek(prompt, max_tokens=max_tokens * 2, _retry=False), False
+                return {"error": "响应被 max_tokens 截断"}, False
+            
+            try:
+                return json.loads(content), False
+            except json.JSONDecodeError as e:
+                print(f"  [警告] JSON解析失败: {e}")
+                if _retry:
+                    print(f"  [重试] 重新请求，max_tokens={max_tokens * 2}")
+                    return call_deepseek(prompt, max_tokens=max_tokens * 2, _retry=False), False
+                return {"error": f"JSON解析失败: {e}"}, False
         
-    except Exception as e:
-        return {"error": str(e)}
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status in (401, 402, 403):
+                return {"error": f"HTTP {status}（认证/余额问题）"}, True
+            return {"error": str(e)}, False
+        except Exception as e:
+            return {"error": str(e)}, False
+    
+    result, auth_error = _do_request(api_key)
+    if auth_error and backup_key and backup_key != api_key:
+        print(f"  [切换] 主 key 认证/余额失败，切换备用 key 重试")
+        result, _ = _do_request(backup_key)
+    
+    return result
 
 
-def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict, nav_calc: dict, ai_result: dict, news_list: list) -> str:
+def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict, nav_calc: dict, ai_result: dict, news_list: list, streak_result: dict = None) -> str:
     """生成 Markdown 报告"""
     
     nq = market_data.get("nasdaq", {})
@@ -582,19 +600,25 @@ def generate_markdown_report(trade_date: str, market_data: dict, nav_data: dict,
 
 ---
 
-## 五、国内新闻摘要
+## 五、主板连续收涨候选 Top 10
+
+{render_section(streak_result or {'ok': False, 'reason': '未运行筛选'})}
+
+---
+
+## 六、国内新闻摘要
 
 {chr(10).join(news_lines) if news_lines else '- 暂无新闻'}
 
 ---
 
-## 六、数据缺失项
+## 七、数据缺失项
 
 {chr(10).join(['- ' + m for m in missing]) if missing else '- 无'}
 
 ---
 
-## 七、风险提示
+## 八、风险提示
 
 {chr(10).join(['- ' + r for r in risks]) if risks else '- 本报告不构成投资建议'}
 - 溢价率（券商口径）= 价格 ÷ 最新公布净值 − 1，与历史序列同口径，可直接比较
@@ -712,7 +736,10 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
     
     # 7. 生成报告
     print("\n[生成报告]...")
-    report = generate_markdown_report(trade_date, market_data, nav_data, nav_calc, ai_result, news_list)
+    print("\n[连涨筛选] 拉取上一交易日主板榜单...")
+    streak_result = fetch_candidates(trade_date)
+    print(f"  {'候选 ' + str(streak_result['total']) + ' 只' if streak_result.get('ok') else '未通过: ' + streak_result['reason']}")
+    report = generate_markdown_report(trade_date, market_data, nav_data, nav_calc, ai_result, news_list, streak_result)
     
     # 保存文件
     report_path = REPORTS_DIR / f"preopen_{trade_date}.md"
@@ -793,6 +820,8 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
     _stale = nav_calc.get("nav_stale_days")
     if _stale is not None and _stale > 5:
         quality_issues.append(f"净值陈旧 {_stale} 天")
+    if not streak_result.get("ok"):
+        quality_issues.append(f"主板连涨榜不可用：{streak_result.get('reason', '未知原因')}")
     if status == "complete" and quality_issues:
         status = "partial"
 
@@ -820,6 +849,9 @@ def run(slot: str = "manual", ignore_calendar: bool = False) -> dict:
             status=status,
             report_path=report_path,
         )
+        # 业务层投递状态回写：报告完整生成即视为已投递（此前 mark_delivery 从未被调用，delivery_status 一直 pending）
+        if status == "complete":
+            mark_delivery(trade_date, "delivered")
         print(f"\n[状态] {status} (slot={slot})")
         if reason:
             print(f"  {reason}")

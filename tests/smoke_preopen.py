@@ -57,7 +57,7 @@ def _run_one(name, fn):
 def t_imports():
     mods = ["market_session", "subscription_regimes", "subscription_watch",
             "premium_history", "fx_history", "us_market", "estimate_log",
-            "import_premium_history", "preopen_report"]
+            "import_premium_history", "preopen_report", "rising_streak"]
     bad = []
     for m in mods:
         try:
@@ -65,6 +65,78 @@ def t_imports():
         except Exception as e:
             bad.append(f"{m}: {e}")
     assert not bad, "导入失败: " + "; ".join(bad)
+
+
+@case("连涨榜日期、市场范围与评分渲染")
+def t_rising_streak():
+    from rising_streak import _eligible, _parse_page, _evaluate, _previous_session, render_section
+    assert _previous_session("2026-09-28") == "2026-09-24", "中秋休市后应回溯至9月24日"
+    assert _eligible("002123", "示例") and _eligible("605123", "示例")
+    for code, name in [("300123", "创业"), ("301123", "创业"), ("688123", "科创"),
+                       ("689123", "科创"), ("830123", "北交"), ("600123", "ST样本")]:
+        assert not _eligible(code, name), f"不应纳入 {code} {name}"
+    html = ('更新时间：2026-09-24 <span class="page_info">1/1</span><tbody>'
+            '<tr><td>1</td><td>600123</td><td>样本甲</td><td>12</td><td>13</td><td>11</td>'
+            '<td>3</td><td>9.5%</td><td>20%</td><td>化工</td></tr>'
+            '<tr><td>2</td><td>300123</td><td>样本乙</td><td>20</td><td>22</td><td>18</td>'
+            '<td>4</td><td>30%</td><td>80%</td><td>电子</td></tr>'
+            '<tr><td>3</td><td>601123</td><td>样本丙</td><td>6</td><td>7</td><td>5</td>'
+            '<td>2</td><td>3%</td><td>10%</td><td>银行</td></tr></tbody>')
+    day, pages, rows = _parse_page(html)
+    assert (day, pages, len(rows)) == ("2026-09-24", 1, 1)
+    result = {"ok": True, "date": day, "source": "https://example.org", "total": 1,
+              "top": [_evaluate(rows[0])]}
+    rendered = render_section(result)
+    assert "样本甲（600123）" in rendered and "股价（元）" in rendered
+    assert "| 1 | 样本甲（600123） | 12.00 |" in rendered
+    assert "样本乙" not in rendered and "上涨概率" in rendered
+    assert "动量/18.75" in rendered and "日线/25" in rendered and "未经回测校准" in rendered
+    assert abs(sum(result["top"][0]["score_components"].values()) - result["top"][0]["score"]) < 0.01
+    sample = dict(rows[0], days=5, gain=12.0, turnover=15.0)
+    mild = _evaluate(sample)
+    stronger = _evaluate(dict(sample, gain=17.0))
+    overheated = _evaluate(dict(sample, gain=45.0, turnover=65.0))
+    assert stronger["score_components"]["momentum"] > mild["score_components"]["momentum"]
+    assert stronger["score"] > mild["score"], "合理涨幅应有正向权重"
+    assert overheated["score"] < stronger["score"], "极端涨幅/换手不应自动登顶"
+    assert 0 <= mild["score"] <= 100
+    assert "不生成虚构的 Top 10" in render_section({"ok": False, "reason": "榜单过期"})
+    from unittest.mock import Mock
+    from rising_streak import fetch_candidates
+    stale_response = Mock(status_code=200, text=html.replace("2026-09-24", "2026-09-23"))
+    stale_response.raise_for_status.return_value = None
+    stale_session = Mock()
+    stale_session.get.return_value = stale_response
+    stale_result = fetch_candidates("2026-09-28", stale_session)
+    assert not stale_result["ok"] and "拒绝" in stale_result["reason"]
+    assert stale_session.get.call_count == 1
+
+
+@case("连涨候选日线复核与日期门禁")
+def t_rising_streak_daily():
+    from unittest.mock import Mock
+    from rising_streak import _daily_structure, _evaluate
+    sample = _evaluate({"code": "600123", "name": "样本甲", "price": 15.0,
+                        "days": 5, "gain": 12.0, "turnover": 15.0, "sector": "设备"})
+    from datetime import date, timedelta
+    start = date(2026, 6, 29)
+    bars = [[(start + timedelta(days=i)).isoformat(), "", f"{9 + i / 10:.2f}", "", "", str(100 + i)]
+            for i in range(61)]
+    bars[-1][0] = "2026-09-28"
+    bars[-1][2] = "15.00"
+    session = Mock()
+    session.get.return_value.json.return_value = {"data": {"sh600123": {"qfqday": bars}}}
+    session.get.return_value.raise_for_status.return_value = None
+    scored = _daily_structure(sample, "2026-09-28", session)
+    assert scored["technical"]["date"] == "2026-09-28"
+    assert 0 <= scored["score_components"]["technical"] <= 25
+    assert abs(sum(scored["score_components"].values()) - scored["score"]) < 0.02
+    try:
+        _daily_structure(sample, "2026-09-29", session)
+    except ValueError as exc:
+        assert "日期不符" in str(exc)
+    else:
+        raise AssertionError("过期日线应拒绝")
 
 
 # ---------------------------------------------------------------- 交易时段
@@ -270,7 +342,8 @@ def t_report_render():
         "2026-09-21", market, nav_data, calc,
         {"summary": "测试"}, [{"title": "测试新闻"}])
     assert isinstance(md, str) and len(md) > 300, f"报告过短: {len(md) if isinstance(md, str) else md}"
-    for must in ["161130 基金分析", "溢价率（券商口径）", "指数修正", "历史分位"]:
+    for must in ["161130 基金分析", "溢价率（券商口径）", "指数修正", "历史分位",
+                 "主板连续收涨候选 Top 10"]:
         assert must in md, f"报告缺少区块「{must}」"
     # A股表格应为收盘点位 + 涨跌幅
     assert "上证指数" in md, "缺上证指数行"
