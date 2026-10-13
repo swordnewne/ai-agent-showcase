@@ -12,6 +12,7 @@ API格式：
 
 import requests
 import re
+import math
 from datetime import datetime
 
 SINA_HQ = "https://hq.sinajs.cn"
@@ -37,6 +38,28 @@ def _parse_sina_response(text: str) -> dict:
     return match.group(1).split(",")
 
 
+def _number(parts, index):
+    """Return a finite numeric field, or None for an empty/malformed value."""
+    try:
+        value = float(parts[index])
+        return value if math.isfinite(value) else None
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _validate_ohlc(data: dict) -> dict:
+    """Reject impossible quotes instead of silently publishing shifted fields."""
+    required = (data.get("latest"), data.get("prev_close"), data.get("open"),
+                data.get("high"), data.get("low"))
+    if any(value is None or value <= 0 for value in required):
+        return {"error": "行情字段缺失或非正数", "symbol": data.get("symbol"),
+                "source": "sina"}
+    if data["high"] < max(data["open"], data["latest"]) or data["low"] > min(data["open"], data["latest"]):
+        return {"error": "行情高低价不满足基本不变量", "symbol": data.get("symbol"),
+                "source": "sina"}
+    return data
+
+
 def fetch_nasdaq_futures() -> dict:
     """抓取纳指期货（替代纳指100现货）"""
     try:
@@ -49,19 +72,19 @@ def fetch_nasdaq_futures() -> dict:
             return {"error": "数据格式异常", "raw": r.text[:200]}
         
         # 纳指期货字段: 最新, _, 昨收, 今开, 最高, 最低, 时间, _, _, _, _, _, 日期, 名称
-        return {
+        return _validate_ohlc({
             "symbol": "hf_NQ",
             "name": "纳斯达克指数期货",
-            "latest": float(parts[0]) if parts[0] else None,
-            "prev_close": float(parts[2]) if parts[2] else None,
-            "open": float(parts[3]) if parts[3] else None,
-            "high": float(parts[4]) if parts[4] else None,
-            "low": float(parts[5]) if parts[5] else None,
+            "latest": _number(parts, 0),
+            "prev_close": _number(parts, 2),
+            "open": _number(parts, 3),
+            "high": _number(parts, 4),
+            "low": _number(parts, 5),
             "time": parts[6] if len(parts) > 6 else None,
-            "date": parts[13] if len(parts) > 13 else None,
+            "date": parts[12] if len(parts) > 12 else None,
             "fetched_at": datetime.now().isoformat(),
             "source": "sina",
-        }
+        })
     except Exception as e:
         return {"error": str(e), "symbol": "hf_NQ"}
 
@@ -82,51 +105,49 @@ def fetch_us_stock(symbol: str) -> dict:
             return {"error": "数据格式异常", "raw": r.text[:200]}
         
         # 美股字段: 名称, 最新价, 涨跌幅(%), 时间, 涨跌额, 开盘价, 昨收, 最高, 最低, 成交量, ...
-        return {
+        return _validate_ohlc({
             "symbol": symbol,
             "name": parts[0],
-            "latest": float(parts[1]) if parts[1] else None,
-            "change_pct": float(parts[2]) if parts[2] else None,
+            "latest": _number(parts, 1),
+            "change_pct": _number(parts, 2),
             "time": parts[3] if len(parts) > 3 else None,
-            "open": float(parts[5]) if len(parts) > 5 and parts[5] else None,
-            "prev_close": float(parts[6]) if len(parts) > 6 and parts[6] else None,
-            "high": float(parts[7]) if len(parts) > 7 and parts[7] else None,
-            "low": float(parts[8]) if len(parts) > 8 and parts[8] else None,
+            # Observed gb_* layout: name,last,change%,time,change_amt,open,high,low,52w_high,...
+            # The previous close is the later reference quote at index 26 (last - change_amt).
+            "prev_close": _number(parts, 26),
+            "open": _number(parts, 5),
+            "high": _number(parts, 6),
+            "low": _number(parts, 7),
             "fetched_at": datetime.now().isoformat(),
             "source": "sina",
-        }
+        })
     except Exception as e:
         return {"error": str(e), "symbol": symbol}
 
 
 def fetch_usd_cny() -> dict:
-    """抓取美元兑人民币汇率"""
+    """抓取美元兑人民币汇率。
+
+    fx_susdcny 的实测布局是 time,bid,latest,spread,...,ask,high,low；
+    不再把无意义的第 5 列当作买价。
+    """
     try:
-        # 新浪外汇接口
         url = f"{SINA_HQ}/list=fx_susdcny"
         r = requests.get(url, timeout=10, headers={"Referer": "https://finance.sina.com.cn"})
         r.raise_for_status()
-        
         parts = _parse_sina_response(r.text)
         if not parts or len(parts) < 8:
             return {"error": "数据格式异常", "raw": r.text[:200]}
-        
-        # 外汇字段: 名称, 时间, 最新价, 涨跌额, 买入价, 卖出价, 最高, 最低, ...
+        latest = _number(parts, 2)
+        if latest is None or latest <= 0:
+            return {"error": "汇率最新价缺失或异常", "symbol": "USD/CNY", "source": "sina"}
         return {
-            "symbol": "USD/CNY",
-            "name": "美元兑人民币",
-            "latest": float(parts[2]) if parts[2] else None,
-            "bid": float(parts[4]) if parts[4] else None,
-            "ask": float(parts[5]) if parts[5] else None,
-            "high": float(parts[6]) if parts[6] else None,
-            "low": float(parts[7]) if parts[7] else None,
-            "time": parts[1] if len(parts) > 1 else None,
-            "fetched_at": datetime.now().isoformat(),
-            "source": "sina",
+            "symbol": "USD/CNY", "name": "美元兑人民币", "latest": latest,
+            "bid": _number(parts, 1), "ask": _number(parts, 5),
+            "high": _number(parts, 6), "low": _number(parts, 7),
+            "time": parts[0], "fetched_at": datetime.now().isoformat(), "source": "sina",
         }
     except Exception as e:
         return {"error": str(e), "symbol": "USD/CNY"}
-
 
 def fetch_dow_futures() -> dict:
     """抓取道指期货"""
@@ -140,8 +161,8 @@ def fetch_dow_futures() -> dict:
         return {
             "symbol": "hf_YM",
             "name": "道琼斯指数期货",
-            "latest": float(parts[0]) if parts[0] else None,
-            "prev_close": float(parts[2]) if parts[2] else None,
+            "latest": _number(parts, 0),
+            "prev_close": _number(parts, 2),
             "fetched_at": datetime.now().isoformat(),
             "source": "sina",
         }
@@ -186,8 +207,8 @@ def fetch_a_share_index(index_code: str, name: str) -> dict:
             "open": float(parts[1]) if parts[1] else None,
             "prev_close": float(parts[2]) if parts[2] else None,
             "latest": float(parts[3]) if parts[3] else None,
-            "high": float(parts[4]) if parts[4] else None,
-            "low": float(parts[5]) if parts[5] else None,
+            "high": _number(parts, 4),
+            "low": _number(parts, 5),
             "fetched_at": datetime.now().isoformat(),
             "source": "sina",
         }

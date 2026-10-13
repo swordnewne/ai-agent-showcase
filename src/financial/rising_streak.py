@@ -1,242 +1,190 @@
-"""A股连续收涨候选观察：只使用已完成交易日的榜单，不预测收益。"""
-
+"""Live mainboard streaks and technical scores from the single BaoStock PG dataset."""
+import hashlib
+import json
 import math
+import os
 import re
 import statistics
-from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
-from html.parser import HTMLParser
-
-import requests
-
+import sys
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+import psycopg
 from trade_calendar import is_trading_day
 
+FINANCE_ADAPTER = Path(__file__).resolve().parents[3] / 'finance-adapter'
+if str(FINANCE_ADAPTER) not in sys.path:
+    sys.path.insert(0, str(FINANCE_ADAPTER))
+from finance_p0a1.baostock_current_reader import (
+    CurrentBaoStockReadError,
+    resolve_current_baostock_scope,
+)
 
-URL = "https://data.10jqka.com.cn/rank/lxsz/"
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-           "Referer": URL}
-DAILY_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-
-
-class _Table(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.rows = []
-        self.row = None
-        self.cell = None
-        self.in_body = False
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "tbody":
-            self.in_body = True
-        elif self.in_body and tag == "tr":
-            self.row = []
-        elif self.row is not None and tag == "td":
-            self.cell = []
-
-    def handle_data(self, data):
-        if self.cell is not None:
-            self.cell.append(data)
-
-    def handle_endtag(self, tag):
-        if tag == "td" and self.cell is not None:
-            self.row.append("".join(self.cell).strip())
-            self.cell = None
-        elif tag == "tr" and self.row is not None:
-            self.rows.append(self.row)
-            self.row = None
-        elif tag == "tbody":
-            self.in_body = False
-
+DATASET = 'cn-a-share-baostock-history'
+SOURCE = 'baostock-daily-k-a-stock'
+RULE_VERSION = 'baostock-mainboard-rising-streak-v1'
+DSN = Path('/root/.config/niko/finance-shadow.dsn')
+WORKSPACE = Path(os.environ.get('NIKO_WORKSPACE') or '/root/.openclaw/workspace')
+CST = timezone(timedelta(hours=8))
 
 def _previous_session(trade_date):
-    day = date.fromisoformat(trade_date) - timedelta(days=1)
-    for _ in range(15):
-        if is_trading_day(day):
-            return day.isoformat()
-        day -= timedelta(days=1)
-    raise ValueError("无法确定上一交易日")
+    day = date.fromisoformat(trade_date)-timedelta(days=1)
+    for _ in range(20):
+        if is_trading_day(day): return day.isoformat()
+        day-=timedelta(days=1)
+    raise ValueError('无法确定上一交易日')
 
+def _score(code,name,bars,expected,dates):
+    if len(bars)<61 or bars[-1]['trade_date']!=expected:
+        raise ValueError('历史不足61日或末日不符')
+    if [b['trade_date'] for b in bars[-61:]]!=dates[-61:]:
+        raise ValueError('最近61交易日存在行情缺口')
+    for b in bars:
+        for key in ('close','preclose','volume','pct_chg'):
+            value=b[key]
+            if value is None or not math.isfinite(float(value)):
+                raise ValueError('缺少真实日线字段')
+        if b['close']<=0 or b['preclose']<=0 or b['volume']<0:
+            raise ValueError('日线价格或成交量异常')
+    days=0
+    for b in reversed(bars):
+        if b['trade_status']!=1 or b['pct_chg']<=0: break
+        days+=1
+    if days<3: raise ValueError('连涨不足3日')
+    if days==len(bars): raise ValueError('连涨窗口尚未找到起点')
+    streak=bars[-days:]
+    if any(b['turnover_pct'] is None for b in streak):
+        raise ValueError('连涨期间换手率缺失')
+    gain=(math.prod(1+float(b['pct_chg'])/100 for b in streak)-1)*100
+    turnover=sum(float(b['turnover_pct']) for b in streak)
+    daily=((1+gain/100)**(1/days)-1)*100
+    turnover_per_day=turnover/days
+    base={
+        'momentum':max(0,min(25,gain/18*25)),
+        'persistence':max(0,30-abs(days-5)*4),
+        'liquidity':max(0,20-max(0,1-turnover_per_day)*8-max(0,turnover_per_day-5)*3),
+        'risk':max(0,25-max(0,daily-2.5)*5-max(0,gain-25)*.7-max(0,days-7)*2),
+    }
+    # Align earlier closes to the latest raw close using official ex-rights preclose.
+    # This removes mechanical corporate-action gaps without claiming official qfq prices.
+    closes=[0.0]*len(bars)
+    closes[-1]=float(bars[-1]['close'])
+    for i in range(len(bars)-1,0,-1):
+        closes[i-1]=closes[i]*float(bars[i]['preclose'])/float(bars[i]['close'])
+    volumes=[float(b['volume']) for b in bars]
+    ma5,ma10,ma20,ma60=(statistics.mean(closes[-n:]) for n in (5,10,20,60))
+    returns=[(float(b['close'])/float(b['preclose'])-1)*100 for b in bars[-5:]]
+    volatility=statistics.pstdev(returns)
+    previous_volume=statistics.mean(volumes[-10:-5])
+    if previous_volume<=0: raise ValueError('比较窗口无有效成交量')
+    volume_ratio=statistics.mean(volumes[-5:])/previous_volume
+    high60=max(closes[-60:])
+    alignment=ma5>ma10>ma20>ma60
+    structure=10 if alignment else 5 if closes[-1]>=ma60 else 0
+    structure+=5 if closes[-1]/high60>=.95 else max(0,5-(1-closes[-1]/high60)*30)
+    technical=round(structure+max(0,5-max(0,volatility-1.5)*1.5)+max(0,5-abs(volume_ratio-1.3)*3),1)
+    components={k:round(round(v,1)*.75,2) for k,v in base.items()}
+    components['technical']=technical
+    logic=(f'{days}日实际复合涨幅{gain:.2f}%，实际累计换手{turnover:.2f}%；'
+        f'MA5/10/20/60={ma5:.2f}/{ma10:.2f}/{ma20:.2f}/{ma60:.2f}元，'
+        f'{"多头排列" if alignment else "未形成多头排列"}；'
+        f'距60日收盘高点{(closes[-1]/high60-1)*100:.1f}%；'
+        f'近5日涨跌幅标准差{volatility:.2f}个百分点，近5日均量相对前5日{volume_ratio:.2f}倍。')
+    return dict(code=code,name=name,price=float(bars[-1]['close']),close=float(bars[-1]['close']),
+        days=days,gain=gain,turnover=turnover,sector='',score=round(sum(components.values()),2),
+        score_components=components,logic=logic,technical=dict(ma5=round(ma5,2),ma10=round(ma10,2),
+        ma20=round(ma20,2),ma60=round(ma60,2),high60=round(high60,2),
+        volatility5=round(volatility,2),volume_ratio=round(volume_ratio,2),date=expected),
+        bar_hashes=[b['row_hash'] for b in bars],source_response_hashes=sorted({b['source_response_hash'] for b in bars}))
 
-def _eligible(code, name):
-    # 沪深主板：排除创业板(300/301)、科创板(688/689)、北交所、ETF、B股及ST。
-    return bool(re.fullmatch(r"(?:000|001|002|003|600|601|603|605)\d{3}", code)
-                and name and "ST" not in name.upper() and "退" not in name)
-
-
-def _parse_page(text):
-    updated = re.search(r"更新时间：\s*(\d{4}-\d{2}-\d{2})", text)
-    total = re.search(r'class="page_info"[^>]*>\s*\d+/(\d+)', text)
-    if not updated or not total:
-        raise ValueError("榜单缺少更新日期或分页信息")
-    parser = _Table()
-    parser.feed(text)
-    stocks = []
-    for cells in parser.rows:
-        if len(cells) < 10:
-            continue
-        try:
-            code, name = cells[1:3]
-            if not _eligible(code, name):
-                continue
-            days = int(cells[6])
-            if days < 3:
-                continue
-            price = float(cells[3])
-            gain = float(cells[7].rstrip("%"))
-            turnover = float(cells[8].rstrip("%"))
-            if not all(map(math.isfinite, (price, gain, turnover))) or price <= 0 or gain <= 0 or turnover < 0:
-                continue
-            stocks.append({"code": code, "name": name, "price": price, "close": price,
-                           "days": days, "gain": gain, "turnover": turnover, "sector": cells[9]})
-        except (ValueError, IndexError):
-            continue
-    return updated.group(1), int(total.group(1)), stocks
-
-
-def _evaluate(stock):
-    days, gain, turnover = stock["days"], stock["gain"], stock["turnover"]
-    # 同花顺榜单只有累计涨幅和累计换手，没有逐日波动/成交额；不能伪称测过真实稳定性。
-    # 四项各自落在 [0, 权重]，无基础赠分。以下权重是明确的研究假设，未经样本外回测校准。
-    daily = ((1 + gain / 100) ** (1 / days) - 1) * 100  # 等效日复合涨幅，不是实际逐日涨幅
-    turnover_per_day = turnover / days  # 累计换手的日均近似，不等于每日实际换手
-    momentum = max(0.0, min(25.0, gain / 18.0 * 25.0))
-    persistence = max(0.0, 30.0 - abs(days - 5) * 4.0)
-    liquidity = max(0.0, 20.0 - max(0.0, 1.0 - turnover_per_day) * 8.0
-                    - max(0.0, turnover_per_day - 5.0) * 3.0)
-    risk = max(0.0, 25.0 - max(0.0, daily - 2.5) * 5.0
-               - max(0.0, gain - 25.0) * 0.7 - max(0, days - 7) * 2.0)
-    components = {"momentum": round(momentum, 1), "persistence": round(persistence, 1),
-                  "liquidity": round(liquidity, 1), "risk": round(risk, 1)}
-    score = round(sum(components.values()), 1)
-    stock = dict(stock, score=score, score_components=components,
-                 daily_equivalent=round(daily, 2), turnover_per_day=round(turnover_per_day, 2))
-    pace_note = ("等效日涨幅偏快，可能透支短线空间" if daily > 2.5
-                 else "等效日涨幅未触发过热扣分（不代表逐日波动平稳）")
-    liquidity_note = ("平均换手偏低，关注成交承接" if turnover_per_day < 1
-                      else "平均换手偏高，留意分歧与回撤" if turnover_per_day > 5
-                      else "平均换手位于观察区间，仍需逐日量价确认")
-    stock["logic"] = (f"{stock['sector']}；{days}日累计涨{gain:.1f}%提供动量依据，"
-                      f"等效日复合涨幅{daily:.2f}%：{pace_note}；"
-                      f"累计换手{turnover:.1f}%／日均近似{turnover_per_day:.2f}%：{liquidity_note}；"
-                      f"持续{days}日，{('连涨末端需防拥挤' if days > 7 else '观察能否维持趋势')}。"
-                      "后续核对收盘价、逐日量价与公告；收盘不再创新高则连涨条件失效。")
-    return stock
-
-
-def _daily_structure(stock, expected, session):
-    """对榜单候选作日线复核；数据缺口直接剔除，不以缺失值补高分。"""
-    code = stock["code"]
-    symbol = ("sh" if code.startswith("6") else "sz") + code
-    response = session.get(DAILY_URL, params={"param": f"{symbol},day,,,90,qfq"}, timeout=10)
-    response.raise_for_status()
-    data = response.json().get("data", {}).get(symbol, {})
-    bars = data.get("qfqday") or data.get("day") or []
-    if len(bars) < 61 or bars[-1][0] != expected:
-        raise ValueError(f"{code} 日线缺失或日期不符")
-    closes = [float(b[2]) for b in bars]
-    volumes = [float(b[5]) for b in bars]
-    if not all(math.isfinite(x) and x > 0 for x in closes + volumes):
-        raise ValueError(f"{code} 日线数值异常")
-    if abs(closes[-1] / stock["price"] - 1) > 0.02:
-        raise ValueError(f"{code} 榜单收盘价与日线不符")
-    ma5 = statistics.mean(closes[-5:])
-    ma10 = statistics.mean(closes[-10:])
-    ma20 = statistics.mean(closes[-20:])
-    ma60 = statistics.mean(closes[-60:])
-    returns = [(closes[i] / closes[i - 1] - 1) * 100 for i in range(-5, 0)]
-    volatility = statistics.pstdev(returns)
-    volume_ratio = statistics.mean(volumes[-5:]) / statistics.mean(volumes[-10:-5])
-    high60 = max(closes[-60:])
-    above60 = closes[-1] >= ma60
-    alignment = ma5 > ma10 > ma20 > ma60
-    near_high = closes[-1] / high60 >= .95
-    structure = (10 if alignment else 5 if above60 else 0)
-    structure += 5 if near_high else max(0, 5 - (1 - closes[-1] / high60) * 30)
-    rhythm = max(0, 5 - max(0, volatility - 1.5) * 1.5)
-    volume_score = max(0, 5 - abs(volume_ratio - 1.3) * 3)
-    technical = round(structure + rhythm + volume_score, 1)
-    base = stock["score_components"]
-    # 榜单四因子缩放至75分，日线结构占25分，避免凭形态覆盖基本动量和风险。
-    scaled = {k: round(v * .75, 2) for k, v in base.items()}
-    # 保留两位内部精度，使总分严格等于组件之和；报告展示层再按一位格式化。
-    # 这样审计和回测不会因多次四舍五入产生不可解释的分数差。
-    stock = dict(stock, score_components={**scaled, "technical": technical},
-                 score=round(sum(scaled.values()) + technical, 2),
-                 technical={"ma5": round(ma5, 2), "ma10": round(ma10, 2),
-                            "ma20": round(ma20, 2), "ma60": round(ma60, 2),
-                            "high60": round(high60, 2), "volatility5": round(volatility, 2),
-                            "volume_ratio": round(volume_ratio, 2), "date": expected})
-    stock["logic"] += (f" 日线复核：MA5/10/20/60={ma5:.2f}/{ma10:.2f}/{ma20:.2f}/{ma60:.2f}元，"
-                       f"{'多头排列' if alignment else '未形成多头排列'}；距60日收盘高点{(closes[-1] / high60 - 1) * 100:.1f}%；"
-                       f"近5日涨跌幅标准差{volatility:.2f}个百分点，近5日量相对前5日{volume_ratio:.2f}倍。"
-                       "量比为分窗均量比，非交易软件盘中量比；技术形态不代表收益预测。")
-    return stock
-
-
-def fetch_candidates(trade_date, session=None):
-    """盘前只允许截至上一交易日的完整榜单；日期不符明确降级，不拿旧榜冒充今日。"""
-    expected = _previous_session(trade_date)
-    session = session or requests.Session()
-    rows, seen = [], set()
+def fetch_candidates(trade_date,session=None,expected_date=None):
+    """Read completed BaoStock sessions. No HTTP request or alternative source."""
+    expected=expected_date or _previous_session(trade_date)
     try:
-        response = session.get(URL, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-        response.encoding = "gbk"
-        updated, pages, current = _parse_page(response.text)
-        if updated != expected:
-            return {"ok": False, "reason": f"榜单日期{updated}，上一交易日应为{expected}，拒绝使用过期/盘中数据"}
-        if not 1 <= pages <= 30:
-            raise ValueError("榜单分页异常")
-        for page in range(1, pages + 1):
-            if page > 1:
-                response = session.get(f"{URL}page/{page}/", headers=HEADERS, timeout=10)
-                response.raise_for_status()
-                response.encoding = "gbk"
-                page_date, page_count, current = _parse_page(response.text)
-                if page_date != updated or page_count != pages:
-                    raise ValueError("分页日期或页数不一致")
-            if not current:
-                raise ValueError(f"第{page}页未解析出合格主板连涨股票，拒绝不完整榜单")
-            for stock in current:
-                if stock["code"] not in seen:
-                    seen.add(stock["code"])
-                    rows.append(_evaluate(stock))
-        if not rows:
-            raise ValueError("榜单没有合格股票")
-        verified = []
-        # 每个候选均按同一套日线指标复核；不能仅对原榜前十复核，否则会漏掉更稳的股票。
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = [pool.submit(_daily_structure, s, updated, session) for s in rows]
-            for future in futures:
-                try:
-                    verified.append(future.result())
-                except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, ZeroDivisionError):
-                    continue
-        if len(verified) < 10:
-            raise ValueError(f"日线验证仅{len(verified)}/{len(rows)}只成功，不足10只；拒绝生成Top 10")
-        verified.sort(key=lambda s: (-s["score"], -s["days"], s["code"]))
-        return {"ok": True, "date": updated, "source": URL, "daily_source": DAILY_URL,
-                "total": len(rows), "verified": len(verified), "top": verified[:10]}
-    except (requests.RequestException, ValueError) as exc:
-        return {"ok": False, "reason": str(exc)}
-
+        latest_complete=datetime.now(CST).date()
+        if datetime.now(CST).hour<15: latest_complete-=timedelta(days=1)
+        if date.fromisoformat(expected)>latest_complete:
+            raise ValueError('请求日期尚未收盘')
+        with psycopg.connect(DSN.read_text().strip(),connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+                cur.execute("SET LOCAL statement_timeout='30s'")
+                scope = resolve_current_baostock_scope(conn, dataset_id=DATASET)
+                versions = scope['dataset_versions']
+                cur.execute('SELECT DISTINCT trade_date FROM finance.daily_bars WHERE dataset_id=%s AND dataset_version=ANY(%s)'
+                    ' AND adjust_type=%s AND source_id=%s AND trade_date BETWEEN %s AND %s ORDER BY trade_date DESC LIMIT 91',
+                    (DATASET,versions,'raw',SOURCE,date.fromisoformat(expected)-timedelta(days=180),expected))
+                dates=sorted(str(row[0]) for row in cur.fetchall())
+                if len(dates)<61 or dates[-1]!=expected:
+                    raise ValueError(f'BaoStock库未覆盖所需收盘日{expected}（最新{dates[-1] if dates else "无"}）')
+                # Compare to the exchange calendar so an absent full-market day cannot vanish silently.
+                day=date.fromisoformat(dates[0]); required=[]
+                while day<=date.fromisoformat(expected):
+                    if is_trading_day(day): required.append(day.isoformat())
+                    day+=timedelta(days=1)
+                if required!=dates: raise ValueError('BaoStock历史窗口缺少完整交易日')
+                cur.execute("""SELECT b.security_id,s.code_name FROM finance.daily_bars b
+                    JOIN finance.securities s USING (security_id)
+                    WHERE b.dataset_id=%s AND b.dataset_version=ANY(%s) AND b.adjust_type='raw'
+                    AND b.source_id=%s AND b.trade_date=ANY(%s::date[])
+                    AND b.security_id ~ '^(000|001|002|003|600|601|603|605)[0-9]{3}\\.(SH|SZ)$'
+                    AND b.pct_chg>0 AND b.trade_status=1 AND b.is_st=0 AND s.code_name IS NOT NULL
+                    AND upper(s.code_name) NOT LIKE '%%ST%%' AND s.code_name NOT LIKE '%%退%%'
+                    GROUP BY b.security_id,s.code_name HAVING count(*)=3 ORDER BY b.security_id""",
+                    (DATASET,versions,SOURCE,dates[-3:]))
+                candidates=cur.fetchall()
+                cur.execute("""SELECT security_id,trade_date,close,preclose,volume,pct_chg,turnover_pct,
+                    trade_status,is_st,row_hash,source_response_hash FROM finance.daily_bars
+                    WHERE dataset_id=%s AND dataset_version=ANY(%s) AND adjust_type='raw' AND source_id=%s
+                    AND security_id=ANY(%s) AND trade_date BETWEEN %s AND %s ORDER BY security_id,trade_date""",
+                    (DATASET,versions,SOURCE,[x[0] for x in candidates],dates[0],expected))
+                columns=[c.name for c in cur.description]; grouped={}
+                for row in cur.fetchall():
+                    b=dict(zip(columns,row)); b['trade_date']=str(b['trade_date'])
+                    grouped.setdefault(b['security_id'],[]).append(b)
+        verified=[]; excluded=[]
+        for sid,name in candidates:
+            try: verified.append(_score(sid.split('.')[0],name,grouped.get(sid,[]),expected,dates))
+            except (ValueError,TypeError,ZeroDivisionError) as exc: excluded.append({'security_id':sid,'reason':str(exc)})
+        verified.sort(key=lambda s:(-s['score'],-s['days'],s['code']))
+        scope_versions=scope['dataset_versions']
+        result=dict(ok=True,date=expected,source='https://www.baostock.com',daily_source='https://www.baostock.com',
+            dataset_id=DATASET,dataset_version=scope['active_version'],dataset_versions=scope_versions,
+            latest_trade_date=scope['latest_trade_date'],data_quality_status=scope['data_quality_status'],
+            reader_receipt_hash=scope['reader_receipt_hash'],source_id=SOURCE,rule_version=RULE_VERSION,
+            total=len(candidates),verified=len(verified),top=verified[:10],excluded=excluded,
+            price_basis='official_preclose_aligned_to_latest_close',lookup_window=[dates[0],dates[-1]],
+            generated_at=datetime.now(CST).isoformat(),report_trade_date=trade_date,
+            verified_candidates=verified)
+    except (CurrentBaoStockReadError,psycopg.Error,OSError,ValueError) as exc:
+        result=dict(ok=False,reason=str(exc),source_id=SOURCE,dataset_id=DATASET,
+            date=expected,rule_version=RULE_VERSION,report_trade_date=trade_date,generated_at=datetime.now(CST).isoformat())
+    result['receipt_hash']='sha256:'+hashlib.sha256(json.dumps(result,ensure_ascii=False,sort_keys=True,
+        separators=(',',':')).encode()).hexdigest()
+    receipts=WORKSPACE/'reports/preopen/source_receipts'
+    receipts.mkdir(parents=True,exist_ok=True)
+    path=receipts/f'baostock_streak_{trade_date}_asof_{expected}.json'
+    temp=path.with_suffix('.tmp');temp.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
+    result['receipt_path']=str(path)
+    return result
 
 def render_section(result):
-    if not result.get("ok"):
-        return f"> ⚠️ 连涨筛选不可用：{result.get('reason', '未取到数据')}。不生成虚构的 Top 10。"
-    rows = [f"> 来源：[同花顺连涨榜]({result['source']})；截至 {result['date']} 收盘，"
-            f"沪深主板连续收涨≥3个交易日，合格 {result['total']} 只。"
-            f"日线复核 {result.get('verified', '未标注')} 只；日线来源：[腾讯行情]({result.get('daily_source', DAILY_URL)})。"
-            "排名是规则化观察优先级，不是上涨概率；不含创业板、科创板、北交所、ST。",
-            "", "| 排名 | 股票 | 股价（元） | 连涨 | 累计涨幅 | 累计换手 | 动量/18.75 | 持续/22.5 | 换手/15 | 风险/18.75 | 日线/25 | 总分/100 | 依据与验证 |",
-            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
-    for i, s in enumerate(result["top"], 1):
-        c = s.get("score_components", {})
-        rows.append(f"| {i} | {s['name']}（{s['code']}） | {s['price']:.2f} | {s['days']}天 | "
-                    f"{s['gain']:.1f}% | {s['turnover']:.1f}% | {c.get('momentum', 'N/A')} | "
-                    f"{c.get('persistence', 'N/A')} | {c.get('liquidity', 'N/A')} | "
-                    f"{c.get('risk', 'N/A')} | {c.get('technical', 'N/A')} | {s['score']:.1f} | {s['logic']} |")
-    rows.append("\n> 评分口径（未经回测校准）：榜单动量18.75、持续22.5、换手15、过热风险18.75；日线结构25（均线/60日高点15、近5日波动5、近5日均量相对前5日5）。榜单原四因子按0.75折算；高分不等于未来收益期望更高。")
-    rows.append("> 量价指标仅描述历史形态；财报、消息、行业催化与大盘风险尚未核查，也没有经样本外回测证明未来收益优势。需结合公告和后续收盘复核，不构成买卖建议或自动交易信号。")
-    return "\n".join(rows)
+    if not result.get('ok'):
+        return f"> ⚠️ BaoStock 连涨筛选不可用：{result.get('reason','未取到数据')}。"
+    rows=[f"> 候选与历史指标均来自 [BaoStock](https://www.baostock.com) PostgreSQL 历史库；"
+        f"截至 {result['date']} 收盘，沪深主板、非ST、连续上涨≥3个交易日，"
+        f"初选 {result['total']} 只，历史指标通过 {result['verified']} 只。"
+        f"数据集 `{result['dataset_id']}`；实际版本 `{', '.join(result['dataset_versions'])}`；"
+        f"最新行情 `{result['latest_trade_date']}`；质量状态 `{result['data_quality_status']}`；规则 `{result['rule_version']}`。",
+        '', '| 排名 | 股票 | 收盘价 | 连涨 | 复合涨幅 | 累计换手 | 动量/18.75 | 持续/22.5 | 换手/15 | 风险/18.75 | 日线/25 | 总分/100 | 依据 |',
+        '|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|']
+    for i,s in enumerate(result['top'],1):
+        c=s['score_components']
+        rows.append(f"| {i} | {s['name']}（{s['code']}） | {s['price']:.2f} | {s['days']}天 | {s['gain']:.2f}% | "
+            f"{s['turnover']:.2f}% | {c['momentum']} | {c['persistence']} | {c['liquidity']} | {c['risk']} | "
+            f"{c['technical']} | {s['score']:.1f} | {s['logic']} |")
+    if not result['top']: rows.append('当前完整数据下没有通过规则的候选。')
+    rows.extend(['', '> 连涨以官方 pctChg>0 且正常交易判断；平盘、下跌或停牌中断。累计涨幅为每日涨幅的复合值，累计换手为实际每日换手之和。',
+        '> 均线和60日高点以官方前收盘价对齐至末日价格，消除除权除息的机械跳变；这不是官方前复权报价。均量比采用原始成交股数，拆股等事件可能影响该指标。',
+        '> 权重沿用既有规则，未经回测校准；排名表示观察优先级，不代表上涨概率。此为当前观察报告，证券名称为最近观测值，不宣称历史PIT回测已验收。',
+        f"> Current reader 回执哈希：`{result['reader_receipt_hash']}`；来源回执：`{result['receipt_path']}`；内容哈希：`{result['receipt_hash']}`。"])
+    return '\n'.join(rows)
