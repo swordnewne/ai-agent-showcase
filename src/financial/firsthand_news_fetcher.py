@@ -30,22 +30,13 @@ DATA_DIR = os.path.join(WORKSPACE, "data")
 ALERTS_DIR = os.path.join(WORKSPACE, ".alerts")
 FIRSTHAND_FILE = os.path.join(DATA_DIR, "firsthand_news.jsonl")
 
-# DeepSeek API
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-
-if not DEEPSEEK_API_KEY:
-    env_file = os.path.join(WORKSPACE, ".env")
-    if os.path.exists(env_file):
-        with open(env_file, "r") as f:
-            for line in f:
-                if line.startswith("DEEPSEEK_API_KEY="):
-                    DEEPSEEK_API_KEY = line.strip().split("=", 1)[1]
-                elif line.startswith("DEEPSEEK_BASE_URL="):
-                    DEEPSEEK_BASE_URL = line.strip().split("=", 1)[1]
-                elif line.startswith("DEEPSEEK_MODEL="):
-                    DEEPSEEK_MODEL = line.strip().split("=", 1)[1]
+# DeepSeek API（2026-10-12 起收敛到 llm_config 单一权威加载器，轨道 1）
+from llm_config import load_llm_config as _load_llm_config
+_LLM_CFG = _load_llm_config(env_paths=(os.path.join(WORKSPACE, ".env"),))
+DEEPSEEK_API_KEY = _LLM_CFG.api_key
+DEEPSEEK_BASE_URL = _LLM_CFG.base_url
+DEEPSEEK_MODEL = _LLM_CFG.model
+DEEPSEEK_REASONING_EFFORT = _LLM_CFG.reasoning_effort
 
 
 def ensure_dirs():
@@ -212,7 +203,9 @@ def ai_analyze_news_batch(news_list: List[Dict]) -> Dict[int, Dict]:
             "model": DEEPSEEK_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 2000
+            "max_tokens": 2000,
+            "thinking": {"type": "disabled" if DEEPSEEK_REASONING_EFFORT == "none" else "enabled"},
+            **({"reasoning_effort": DEEPSEEK_REASONING_EFFORT} if DEEPSEEK_REASONING_EFFORT != "none" else {}),
         }).encode("utf-8")
         
         req = urllib.request.Request(
@@ -221,7 +214,7 @@ def ai_analyze_news_batch(news_list: List[Dict]) -> Dict[int, Dict]:
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
         )
         
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode("utf-8"))
             content = result["choices"][0]["message"]["content"]
             

@@ -24,27 +24,26 @@ from typing import List, Dict
 sys.path.insert(0, '/root/.openclaw/workspace/skills/automation/scrapling-adapter')
 from scrapling.fetchers import Fetcher
 
+# 发布时间门禁（P0.5 陷阱 4）：旧稿重采不得触发 urgent/high 推送
+try:
+    from news_window import parse_publish_time as _parse_publish_time
+except ImportError:
+    _parse_publish_time = None
+
+PUSH_MAX_AGE_HOURS = 24  # 发布时间超过 24h 的可判定旧稿不推送；不可解析的保持原行为
+
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(WORKSPACE, "data")
 ALERTS_DIR = os.path.join(os.path.dirname(WORKSPACE), ".alerts")
 NEWS_FILE = os.path.join(DATA_DIR, "news_realtime.jsonl")
 
-# DeepSeek API
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-
-if not DEEPSEEK_API_KEY:
-    env_file = os.path.join(WORKSPACE, ".env")
-    if os.path.exists(env_file):
-        with open(env_file, "r") as f:
-            for line in f:
-                if line.startswith("DEEPSEEK_API_KEY="):
-                    DEEPSEEK_API_KEY = line.strip().split("=", 1)[1]
-                elif line.startswith("DEEPSEEK_BASE_URL="):
-                    DEEPSEEK_BASE_URL = line.strip().split("=", 1)[1]
-                elif line.startswith("DEEPSEEK_MODEL="):
-                    DEEPSEEK_MODEL = line.strip().split("=", 1)[1]
+# DeepSeek API（2026-10-12 起收敛到 llm_config 单一权威加载器，轨道 1）
+from llm_config import load_llm_config as _load_llm_config
+_LLM_CFG = _load_llm_config(env_paths=(os.path.join(WORKSPACE, ".env"),))
+DEEPSEEK_API_KEY = _LLM_CFG.api_key
+DEEPSEEK_BASE_URL = _LLM_CFG.base_url
+DEEPSEEK_MODEL = _LLM_CFG.model
+DEEPSEEK_REASONING_EFFORT = _LLM_CFG.reasoning_effort
 
 # ============ 源配置 ============
 SINA_API = "https://feed.mix.sina.com.cn/api/roll/get"
@@ -321,7 +320,9 @@ def ai_analyze_all(news_list: List[Dict]) -> Dict[int, Dict]:
                 "model": DEEPSEEK_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.2,
-                "max_tokens": 2000
+                "max_tokens": 2000,
+                "thinking": {"type": "disabled" if DEEPSEEK_REASONING_EFFORT == "none" else "enabled"},
+                **({"reasoning_effort": DEEPSEEK_REASONING_EFFORT} if DEEPSEEK_REASONING_EFFORT != "none" else {}),
             }).encode("utf-8")
             
             req = urllib.request.Request(
@@ -330,7 +331,7 @@ def ai_analyze_all(news_list: List[Dict]) -> Dict[int, Dict]:
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
             )
             
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=60) as response:
                 result = json.loads(response.read().decode("utf-8"))
                 content = result["choices"][0]["message"]["content"]
                 
@@ -592,6 +593,15 @@ def main():
             skipped += 1
             print(f"⏭️ 已推送过，跳过: {news['title'][:40]}...")
             continue
+        # 发布时间门禁：可解析且超过 24h 的旧稿不推送（乱码/缺失保持原行为，不过度拦截）
+        if _parse_publish_time is not None:
+            raw_pub = (news.get("published_at_raw") or news.get("ctime")
+                       or news.get("display_time") or news.get("published_at"))
+            pub_dt, _precision = _parse_publish_time(raw_pub)
+            if pub_dt is not None and (datetime.now(timezone(timedelta(hours=8))) - pub_dt) > timedelta(hours=PUSH_MAX_AGE_HOURS):
+                skipped += 1
+                print(f"⏭️ 发布超{PUSH_MAX_AGE_HOURS}h旧稿，跳过推送: {news['title'][:40]}... [发布: {pub_dt.isoformat()[:16]}]")
+                continue
         to_push.append((news, analysis))
         sent_alerts[news_hash] = now_iso
     

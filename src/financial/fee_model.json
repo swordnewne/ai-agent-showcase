@@ -1,0 +1,12 @@
+{
+  "rule_version": "fee-v1.0",
+  "effective_from": "2026-10-13",
+  "per_stock_budget": 3000.0,
+  "commission_rate": 0.0005,
+  "commission_min": 5.0,
+  "stamp_rate_sell": 0.0005,
+  "transfer_rate": 0.00001,
+  "limit_up_rate_main": 1.10,
+  "limit_up_rate_st": 1.05,
+  "lot_size": 100
+}

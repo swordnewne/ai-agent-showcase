@@ -1,235 +1,226 @@
 #!/usr/bin/env python3
-"""
-A股交易日历
+"""Versioned A-share trading calendar stored as a local JSON snapshot."""
 
-设计原则：保守优先 —— 宁可多跑一次，不可漏跑交易日。
+from __future__ import annotations
 
-判定来源（三层，优先级从高到低）：
-  1. 本地缓存 data/trade_calendar.json（由 refresh_from_sse() 在线刷新写入）
-  2. 内置官方休市表 BUILTIN_HOLIDAYS（随代码发布，来源：上交所公告）
-  3. 兜底：周一至周五视为交易日
-
-注意：A股不跟随调休上班。调休出来的周末（如 10/10 周六）A股休市，
-      上交所的休市安排已包含该影响，因此「周一至周五 减 休市日」即为交易日。
-
-刷新：
-  python3 trade_calendar.py --refresh      # 从上交所官网抓取并更新缓存
-  python3 trade_calendar.py --check 2026-09-25   # 查某天是否交易日
-"""
-
+import argparse
+import hashlib
 import json
-import re
 import os
-from datetime import datetime, date, timezone, timedelta
+import re
+import tempfile
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+import requests
 
 WORKSPACE = os.environ.get("NIKO_WORKSPACE") or "/root/.openclaw/workspace"
 CACHE_PATH = Path(WORKSPACE) / "data" / "trade_calendar.json"
 CST = timezone(timedelta(hours=8))
-
 SSE_URL = "https://www.sse.com.cn/disclosure/dealinstruc/closed"
-
-# 上交所官方休市安排（2026 年）
-# 来源: https://www.sse.com.cn/disclosure/dealinstruc/closed
-BUILTIN_HOLIDAYS = {
-    "2026": [
-        # 元旦: 1月1日(四)至1月3日(六)
-        "2026-01-01", "2026-01-02", "2026-01-03",
-        # 春节: 2月15日(日)至2月23日(一)
-        "2026-02-15", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19",
-        "2026-02-20", "2026-02-21", "2026-02-22", "2026-02-23",
-        # 清明节: 4月4日(六)至4月6日(一)
-        "2026-04-04", "2026-04-05", "2026-04-06",
-        # 劳动节: 5月1日(五)至5月5日(二)
-        "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04", "2026-05-05",
-        # 端午节: 6月19日(五)至6月21日(日)
-        "2026-06-19", "2026-06-20", "2026-06-21",
-        # 中秋节: 9月25日(五)至9月27日(日)
-        "2026-09-25", "2026-09-26", "2026-09-27",
-        # 国庆节: 10月1日(四)至10月7日(三)
-        "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05",
-        "2026-10-06", "2026-10-07",
-    ]
-}
+SCHEMA_VERSION = "finance-trading-calendar-v1"
 
 
-def _load_cache() -> dict:
-    if CACHE_PATH.exists():
+class CalendarCoverageError(ValueError):
+    """Raised when the local calendar has no authoritative state for a date."""
+
+
+def _load_cache(path: Path | None = None) -> dict:
+    path = path or CACHE_PATH
+    if not path.exists():
+        raise CalendarCoverageError(f"交易日历文件不存在: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CalendarCoverageError(f"交易日历文件不可读: {path}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+        raise CalendarCoverageError("交易日历 schema 缺失或版本不支持")
+    return value
+
+
+def _validated_year(cache: dict, year: int) -> dict[str, bool]:
+    years = cache.get("years")
+    item = years.get(str(year)) if isinstance(years, dict) else None
+    if not isinstance(item, dict) or not isinstance(item.get("days"), list):
+        raise CalendarCoverageError(f"交易日历未覆盖 {year} 年，请更新 data/trade_calendar.json")
+
+    states: dict[str, bool] = {}
+    expected = date(year, 1, 1)
+    end = date(year, 12, 31)
+    for row in item["days"]:
+        if not isinstance(row, dict):
+            raise CalendarCoverageError(f"{year} 年交易日历记录格式无效")
+        day = row.get("calendar_date")
+        state = row.get("is_trading_day")
+        if not isinstance(day, str) or type(state) is not bool:
+            raise CalendarCoverageError(f"{year} 年交易日历字段无效: {row!r}")
         try:
-            return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+            parsed = date.fromisoformat(day)
+        except ValueError as exc:
+            raise CalendarCoverageError(f"交易日历日期格式无效: {day}") from exc
+        if parsed.year != year or parsed.isoformat() != day or day in states:
+            raise CalendarCoverageError(f"交易日历日期重复或年份不匹配: {day}")
+        states[day] = state
 
-
-def _all_holidays() -> set:
-    """合并内置表与在线缓存"""
-    holidays = set()
-    for dates in BUILTIN_HOLIDAYS.values():
-        holidays.update(dates)
-    for dates in _load_cache().get("holidays", {}).values():
-        holidays.update(dates)
-    return holidays
+    expected_days = (end - expected).days + 1
+    if len(states) != expected_days:
+        raise CalendarCoverageError(f"{year} 年交易日历不完整: {len(states)}/{expected_days} 天")
+    return states
 
 
 def is_trading_day(d=None) -> bool:
-    """判断是否为 A股交易日"""
+    """Return the authoritative local-calendar state for a date."""
     if d is None:
         d = datetime.now(CST).date()
     elif isinstance(d, str):
-        d = datetime.strptime(d, "%Y-%m-%d").date()
-
-    if d.weekday() >= 5:
-        return False
-    return d.strftime("%Y-%m-%d") not in _all_holidays()
+        d = date.fromisoformat(d)
+    elif isinstance(d, datetime):
+        d = d.date()
+    if not isinstance(d, date):
+        raise TypeError("date must be a date, datetime, ISO string, or None")
+    cache = _load_cache()
+    states = _validated_year(cache, d.year)
+    day = d.isoformat()
+    if day not in states:
+        raise CalendarCoverageError(f"交易日历未覆盖日期: {day}")
+    return states[day]
 
 
 def get_trade_date():
-    """今日是交易日则返回 YYYY-MM-DD，否则返回 None"""
+    """Return today's ISO date when the local calendar marks it as trading."""
     today = datetime.now(CST).date()
-    return today.strftime("%Y-%m-%d") if is_trading_day(today) else None
+    return today.isoformat() if is_trading_day(today) else None
 
 
 def reason(d=None) -> str:
-    """返回判定理由（便于报告/排障）"""
     if d is None:
         d = datetime.now(CST).date()
     elif isinstance(d, str):
-        d = datetime.strptime(d, "%Y-%m-%d").date()
-    ds = d.strftime("%Y-%m-%d")
-    if d.weekday() >= 5:
-        return f"{ds} 周末休市"
-    if ds in _all_holidays():
-        return f"{ds} 法定节假日休市"
-    return f"{ds} 交易日"
+        d = date.fromisoformat(d)
+    elif isinstance(d, datetime):
+        d = d.date()
+    return f"{d.isoformat()} {'交易日' if is_trading_day(d) else '休市日'}（JSON 官方日历）"
 
 
-def _parse_sse_holidays(html: str) -> dict:
-    """
-    解析上交所休市安排页面
-
-    返回: {"2026": ["2026-01-01", ...], ...}
-
-    注意: 正则必须严格锚定官方格式「X月Y日（星期Z）至X月Y日」。
-    早期版本用宽松正则 [^至]{0,30}? 跨句配对，会凭空造出
-    2/28-4/30 这种长达两个月的假休市区间，必须避免。
-    """
+def _parse_sse_holidays(html: str) -> dict[str, list[str]]:
     text = re.sub(r"<[^>]+>", " ", html)
     text = text.replace("&nbsp;", " ").replace("　", " ")
     text = re.sub(r"\s+", " ", text)
-
-    # 严格格式: 1月1日（星期四）至1月3日（星期六）
     pattern = re.compile(
         r"(\d{1,2})月(\d{1,2})日\s*[（(][^）)]{0,12}[）)]\s*至\s*(\d{1,2})月(\d{1,2})日"
     )
-
-    result = {}
+    result: dict[str, list[str]] = {}
     sections = re.split(r"(\d{4})年休市安排", text)
     for i in range(1, len(sections) - 1, 2):
         year = sections[i]
-        body = sections[i + 1]
-        dates = set()
-        for m in pattern.finditer(body):
-            m1, d1, m2, d2 = (int(x) for x in m.groups())
+        dates: set[str] = set()
+        for match in pattern.finditer(sections[i + 1]):
+            m1, d1, m2, d2 = (int(value) for value in match.groups())
             try:
                 start = date(int(year), m1, d1)
                 end = date(int(year), m2, d2)
             except ValueError:
                 continue
-            # 单个假期区间不会超过 30 天
             if end < start or (end - start).days > 30:
                 continue
-            cur = start
-            while cur <= end:
-                dates.add(cur.strftime("%Y-%m-%d"))
-                cur += timedelta(days=1)
+            current = start
+            while current <= end:
+                dates.add(current.isoformat())
+                current += timedelta(days=1)
         if dates:
             result[year] = sorted(dates)
     return result
 
 
-def refresh_from_sse(timeout: int = 15) -> dict:
-    """从上交所官网抓取休市安排并更新本地缓存"""
-    import requests
+def build_year(year: int, holidays: list[str], *, source: str, source_url: str,
+               source_response_hash: str, fetched_at: str) -> dict:
+    holiday_set = set(holidays)
+    days = []
+    current = date(year, 1, 1)
+    end = date(year, 12, 31)
+    while current <= end:
+        trading = current.weekday() < 5 and current.isoformat() not in holiday_set
+        days.append({"calendar_date": current.isoformat(), "is_trading_day": trading})
+        current += timedelta(days=1)
+    return {
+        "year": year,
+        "calendar_version": f"{year}-v1",
+        "source": source,
+        "source_url": source_url,
+        "source_response_hash": source_response_hash,
+        "fetched_at": fetched_at,
+        "calendar_basis": "weekdays excluding dates in the SSE-published annual closure schedule",
+        "days": days,
+    }
 
+
+def refresh_from_sse(year: int | None = None, timeout: int = 15, path: Path | None = None) -> dict:
+    """Fetch the SSE annual closure notice and atomically refresh one full year."""
+    path = path or CACHE_PATH
+    response = requests.get(
+        SSE_URL,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    response.encoding = response.apparent_encoding or "utf-8"
+    parsed = _parse_sse_holidays(response.text)
+    target_year = str(year or datetime.now(CST).year)
+    holidays = parsed.get(target_year)
+    if not holidays:
+        raise CalendarCoverageError(f"上交所页面未找到 {target_year} 年休市安排；保留现有日历不变")
+    if len(holidays) > 60:
+        raise CalendarCoverageError(f"{target_year} 年解析出异常休市天数 {len(holidays)}，拒绝更新")
+
+    fetched_at = datetime.now(CST).isoformat()
+    entry = build_year(
+        int(target_year), holidays,
+        source="sse.com.cn",
+        source_url=response.url,
+        source_response_hash="sha256:" + hashlib.sha256(response.content).hexdigest(),
+        fetched_at=fetched_at,
+    )
+    cache = _load_cache(path) if path.exists() else {
+        "schema_version": SCHEMA_VERSION,
+        "calendar_id": "cn-a-share-trading-calendar",
+        "years": {},
+    }
+    cache.setdefault("years", {})[target_year] = entry
+    cache["updated_at"] = fetched_at
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
-        r = requests.get(
-            SSE_URL,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        r.encoding = r.apparent_encoding or "utf-8"
-        parsed = _parse_sse_holidays(r.text)
-        if not parsed:
-            return {"ok": False, "error": "页面未解析出休市日期"}
-
-        # 合理性校验：单年休市日不应超过 60 天（约 33 天为正常）
-        for year, dates in parsed.items():
-            if len(dates) > 60:
-                return {
-                    "ok": False,
-                    "error": f"{year} 年解析出 {len(dates)} 天，超出合理范围，拒绝写入缓存",
-                }
-
-        cache = _load_cache()
-        cache.setdefault("holidays", {})
-        for year, dates in parsed.items():
-            cache["holidays"][year] = dates
-        cache["source"] = "sse.com.cn"
-        cache["refreshed_at"] = datetime.now(CST).isoformat()
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(
-            json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return {
-            "ok": True,
-            "years": sorted(parsed.keys()),
-            "count": sum(len(v) for v in parsed.values()),
-        }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-def ensure_fresh(max_age_days: int = 7) -> dict:
-    """
-    缓存过期则自动刷新（从上交所官网）
-
-    失败不抛异常：拿不到在线数据时静默回退到内置表，
-    绝不因此阻断报告生成。
-    """
-    cache = _load_cache()
-    ts = cache.get("refreshed_at")
-    if ts:
-        try:
-            age = datetime.now(CST) - datetime.fromisoformat(ts)
-            if age.days < max_age_days:
-                return {"refreshed": False, "reason": f"缓存 {age.days} 天前刷新，仍新鲜"}
-        except Exception:
-            pass
-
-    res = refresh_from_sse()
-    return {"refreshed": res.get("ok", False), **res}
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return {
+        "ok": True,
+        "year": target_year,
+        "calendar_version": entry["calendar_version"],
+        "day_count": len(entry["days"]),
+        "trading_day_count": sum(row["is_trading_day"] for row in entry["days"]),
+        "source_response_hash": entry["source_response_hash"],
+        "path": str(path),
+    }
 
 
 if __name__ == "__main__":
-    import sys
-
-    args = sys.argv[1:]
-    if "--refresh" in args:
-        res = refresh_from_sse()
-        print(f"刷新结果: {res}")
-    elif "--ensure-fresh" in args:
-        print(f"保鲜结果: {ensure_fresh()}")
-    elif "--check" in args:
-        idx = args.index("--check")
-        target = args[idx + 1] if len(args) > idx + 1 else None
-        print(f"{reason(target)} → 交易日={is_trading_day(target)}")
+    parser = argparse.ArgumentParser(description="A 股官方交易日历")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--refresh", action="store_true", help="手动从上交所同步指定年度安排")
+    group.add_argument("--check", metavar="YYYY-MM-DD", help="查询指定日期交易状态")
+    parser.add_argument("--year", type=int, help="刷新或查询的年份")
+    args = parser.parse_args()
+    if args.refresh:
+        print(json.dumps(refresh_from_sse(args.year), ensure_ascii=False, indent=2))
+    elif args.check:
+        print(reason(args.check))
     else:
-        print(f"今日: {reason()}")
-        print(f"是否交易日: {is_trading_day()}")
-        cache = _load_cache()
-        if cache.get("refreshed_at"):
-            print(f"在线缓存刷新于: {cache['refreshed_at']}")
-        else:
-            print("在线缓存: 未刷新（仅用内置表）")
+        today = datetime.now(CST).date()
+        print(reason(today))
