@@ -1,63 +1,70 @@
 # AI Agent Showcase — 从需求到落地的硬成果
 
-> **一句话定位**：不是"会调API"，是"给模糊需求→拆可执行方案→跑通并量化"的全链路AI工程能力。
+> **一句话定位**：不是"会调 API"，是"给模糊需求 → 拆可执行方案 → 跑通并量化"的全链路 AI 工程能力。
 
 ---
 
-## 🎯 四个核心项目
+## 🏆 头号项目：A 股盘前研究流水线（2026-10 全新重构）
+
+**业务场景**：每个交易日 08:05 自动生成盘前研究报告——全市场连涨候选筛选、五源新闻证据分析、模型评分与风险闸门、盘后回填结算，全链路无人值守。
+
+**这不是一个"调 API 写 prompt"的 Demo，而是一套有数据工程纪律的研究系统：**
+
+```
+07:50  五源新闻归档（新浪/华尔街见闻/新华社/政府网/财联社）
+08:05  BaoStock 候选筛选（PIT 查询，61 日完整性逐只校验）
+       → 节点1：DeepSeek 全量新闻语义分析（证据快照落盘，哈希绑定）
+       → 冻结量表纯脚本预评（v1.0，规则版本化，不许按当日分布临时调）
+       → 节点2：逐只模型评审（独立无状态请求）+ 空头审查 + 条件式独立复核
+       → 本地风险闸门三问：证据完整性 / 判断不确定性 / 机会质量门槛
+       → decision_日期.json 机读决策 + 盘前报告（计算/叙述分离标注）
+18:10  盘后增量入库（staging → validated 状态机，逐批回执哈希）
+       → 前瞻回填：T+1 买入/T+2 结算/T+3 关窗，费后保本价逐笔精算，
+         涨停不可成交隔离，四档资金组合模拟，沪深300 alpha 超额口径
+```
+
+**核心纪律（差异化所在）**：
+
+- **版本化数据集**：PostgreSQL 中历史基线与每日增量分离，`active/validated/failed` 状态机由数据库控制函数把守，任何读取经统一 reader 并附回执哈希——每一行数据都可溯源到供应商响应哈希；
+- **新闻证据链**：发布时间逐源核验（与原文页面逐秒比对），双条件窗口门禁杜绝旧稿冒充新催化，核验状态分级参与排序，缺失必须明示不得伪造；
+- **模型调用纪律**：所有模型调用为一次性无状态请求，不带会话记忆；复核模型与主评分互相隔离防锚定；模型输出永远可以按 packet hash 追溯输入；
+- **回填统计纪律**：未到期样本标 `pending` 不置零，无法解析标 `unresolved` 不剔除装看不见，框架调整建议须满足"≥100 只次 + 分桶差 ≥15pp + 连续 3 期方向一致"双阈值，不达标逐条标"暂存"——**防止用小样本噪音骗自己**；
+- **失败规则**：任何环节失败输出 `partial/failed` 并保留现场，禁止静默降级、禁止伪造完整结果。
+
+**关键数字**：A 股全市场 5,200+ 只逐日覆盖 │ 历史基线 2016 年起 2,600+ 交易日逐日核验无缺 │ 新闻窗口 5 源 200+ 条/日全量投递 │ 回填样本 1,200+ 只次 │ 对抗测试与冒烟测试覆盖每个闸门
+
+**代码导览**：
+[src/financial/preopen_report.py](src/financial/preopen_report.py) 报告主链路 ·
+[src/financial/news_window.py](src/financial/news_window.py) 新闻窗口深模块 ·
+[src/financial/score_prescreen.py](src/financial/score_prescreen.py) 冻结量表预评 ·
+[src/financial/p0a8_review.py](src/financial/p0a8_review.py) 逐只评审与闸门 ·
+[src/financial/p1a3_backfill.py](src/financial/p1a3_backfill.py) 回填结算引擎 ·
+[src/financial/llm_config.py](src/financial/llm_config.py) 配置单一权威加载器
+
+> 前身"金融信号预警系统"（70 只股票池实时监测）已于 2026-10 归档封存，保留 `signal_pipeline.py` 作演进对照。
+
+---
+
+## 🎯 其他项目
 
 | 项目 | 业务场景 | 核心数据 | 技术关键词 |
 |------|---------|---------|-----------|
-| [金融信号预警系统](./src/financial/) | 实时行情监测+异常检测+恐慌降噪+**信号复盘对比** | **70只**股票池监测、**5分钟**级检测、**恐慌模式**自动降噪、**信号vs实盘**命中率/偏差/虚拟收益 | 新浪财经API、akshare、SQLite、阈值引擎、OpenClaw cron、虚拟收益计算 |
-| [社区学习Agent](./src/community/) | AI在社区自主互动、学习、发帖 | **SSR级**76.67分、**日互动20-30条**、内容A/B实验、**150条/日**限流 | 动态素材、质量门、限流管控、自动体检 |
+| [社区学习Agent](./src/community/) | AI 在社区自主互动、学习、发帖 | **SSR级** 76.67 分、日互动 20-30 条、内容 A/B 实验、**150 条/日**限流 | 动态素材、质量门、限流管控、自动体检 |
 | [Agent自治系统](./src/agent-orchestration/) | 事件驱动的任务调度与自治运维 | **事件路由**+状态机、**自检自愈**（磁盘/API/编码）、**配置即代码** | 优先级队列、检查点、插件化 |
-| [持续学习Agent](./src/self-improving/) | 从用户纠正中自动提取模式、升级本能 | **25+**纠正关键词检测、置信度**≥3次**自动升级SKILL.md规则 | 模式聚类、ECC持续学习、本能进化 |
-
----
-
-## 📊 数据说话
-
-```
-金融信号：     70只监测 │ 5分钟级检测 │ 恐慌模式降噪 │ 涨跌停+大盘异动+放量
-              信号复盘：命中率 / 价格偏差 / 1日虚拟收益 / 5日虚拟收益
-              聚宽同步：持仓+交易日志 → SQLite → 市值计算 → 对比报告
-社区Agent：    SSR级    │ 76.67分  │ 日互动20-30条 │ A/B实验+限流+自动体检
-Agent调度：    事件驱动  │ 状态机管理 │ 自检自愈    │ 配置即代码
-持续学习：     25+关键词 │ 置信度聚类 │ 自动升级规则 │ 越用越懂你
-数据清洗：     4阶段流水线 │ 质量评分45→82 │ 异常检测  │
-模型评测：     情感/板块/幻觉/延迟 │ 4维对比报告 │
-RAG知识库：    本地Embedding │ FAISS向量检索 │ Top-K命中率评测 │
-基础设施：     磁盘85%告警+清理 │ 30天session归档 │ 7天报告清理 │
-```
-
----
-
-## 🏗️ 系统架构
-
-**核心设计**：事件驱动 + 状态机 + 共享数据层 + 持续学习闭环
-
-- **事件层**：用户消息 / 定时触发 / 系统告警 / 心跳信号
-- **路由器**：优先级队列 + 状态机（PENDING→RUNNING→SUCCESS|FAILED|TIMEOUT）
-- **执行层**：对话处理器 / 金融AI / 社区学习 / 系统监控
-- **数据层**：RAG知识库 / 数据清洗 / 模型评测 / 分层记忆（共享服务，按需调用）
-- **学习层**：纠正检测 → 模式聚类 → 置信度升级 → SKILL.md规则写入
-- **存储层**：SQLite / JSON / FAISS / 配置文件
-
-**自检自愈**：磁盘85%自动清理、API超时指数退避、编码失败自动切换、任务失败3次重试
-
-**持续学习**：用户说"不对""错了"→自动记录→出现3次→升级为规则→AI越用越懂你
-
-**详细设计**：[docs/architecture.md](docs/architecture.md) | **调度器代码**：[src/agent-orchestration/scheduler.py](src/agent-orchestration/scheduler.py)
+| [持续学习Agent](./src/self-improving/) | 从用户纠正中自动提取模式、升级本能 | **25+** 纠正关键词检测、置信度 **≥3 次**自动升级 SKILL.md 规则 | 模式聚类、ECC 持续学习、本能进化 |
+| [RAG知识库](./src/rag-knowledge-base/) | 本地向量检索与命中率评测 | 本地 Embedding、FAISS 向量检索、Top-K 命中率评测 | Sentence-Transformers、FAISS |
+| [数据清洗流水线](./src/dataset-cleaning/) | 4 阶段数据质量流水线 | 质量评分 45→82 | pandas、规则引擎 |
+| [模型评测框架](./src/model-evaluation/) | 情感/板块/幻觉/延迟四维对比 | 多模型对比报告 | 评测脚本化 |
 
 ---
 
 ## 🛠️ 技术栈
 
-**架构**：事件驱动、状态机、配置即代码、插件化、检查点机制、持续学习闭环
-**AI/ML**：DeepSeek API、Sentence-Transformers(本地Embedding)、FAISS(向量检索)、凯利公式
-**数据**：pandas(清洗)、SQLite(存储)、akshare(历史行情)、RAG(检索增强)
-**自动化**：OpenClaw Agent框架、OpenClaw cron、HEARTBEAT巡检、A/B内容实验、自动体检
-**工程**：TypeScript严格模式、Result<T,E>、接口定义优先、25+纠正关键词检测
+**数据工程**：PostgreSQL（版本化数据集 + 状态机 +  advisory lock）、BaoStock、Parquet staging、回执哈希链
+**AI/ML**：DeepSeek API（思考模式、无状态一次性调用）、Sentence-Transformers、FAISS
+**架构**：深模块设计、端口适配、配置即代码、fail-closed 失败规则、边界测试
+**自动化**：OpenClaw cron、幂等重试、影子路径并行比对切换
+**工程**：Python、TypeScript 严格模式、金样测试锁定行为、施工回滚点纪律
 
 ---
 
@@ -66,83 +73,30 @@ RAG知识库：    本地Embedding │ FAISS向量检索 │ Top-K命中率评�
 ```bash
 pip install -r requirements.txt
 
-# ── 金融信号预警系统 ──
-cd src/financial/
-python3 signal_pipeline.py --mode realtime   # 实时检测（涨幅≥5% + 成交额≥10亿 / 涨跌停 / 大盘异动）
-python3 signal_pipeline.py --mode summary    # 收盘总结（大盘 + 涨跌停 + TOP5）
-python3 launcher.py warmup                 # 盘前预热
+# 离线测试（不需要数据库与网络）
+python3 tests/test_news_window.py      # 新闻窗口门禁边界测试
+python3 tests/test_trade_calendar.py   # 交易日历测试
+python3 tests/test_preopen_guard.py    # 盘前守卫测试
 
-# 聚宽模拟盘同步 + 市值计算 + 信号复盘（工作日 15:05-15:15 自动执行）
-cd scripts/
-JQ_BACKTEST_ID="your_id" python3 fetch_joinquant_full.py   # 抓取持仓+交易日志
-python3 update_portfolio_value_akshare.py                   # 实时市值计算
-python3 daily_signal_review.py --date 2026-06-27            # 信号 vs 实盘复盘
+# 冒烟测试（部分用例需网络）
+python3 tests/smoke_preopen.py
 
-# 手动录入信号（用于测试/复盘）
-python3 add_signal.py --date 2026-06-27 --code 688256 --side buy --price 1480 --reason "测试"
+# Agent 调度器（事件路由+状态机演示）
+python3 src/agent-orchestration/scheduler.py
 
-# Agent调度器（事件路由+状态机演示）
-python src/agent-orchestration/scheduler.py
+# 持续学习系统演示
+python3 src/self-improving/instinct_system.py --record "不要中英文混用" --context "之前回复"
+python3 src/self-improving/instinct_system.py --evolve
 
-# 持续学习系统（记录纠正+聚类升级，需先创建 self-improving/instincts/ 目录）
-python src/self-improving/instinct_system.py --record "不要中英文混用" --context "之前回复"
-python src/self-improving/instinct_system.py --evolve
-
-# RAG知识库构建
-python src/rag-knowledge-base/build_index.py
-
-# 数据清洗流水线
-python src/dataset-cleaning/pipeline.py
-
-# 模型评测对比
-python src/model-evaluation/framework.py
-
-# 基础设施巡检
-python src/infrastructure/disk_guard.py
-
-# 社区内容生成
-python src/community/content_generator.py
+# RAG 知识库构建 / 数据清洗 / 模型评测
+python3 src/rag-knowledge-base/build_index.py
+python3 src/dataset-cleaning/pipeline.py
+python3 src/model-evaluation/framework.py
 ```
+
+> 金融日报生产链路依赖 PostgreSQL 数据集与 OpenClaw 调度环境，不在本仓库复现；
+> 其工程纪律见上方"核心纪律"与 `src/financial/` 代码注释。
 
 ---
 
-## 📂 仓库结构
-
-```
-scripts/
-├── add_signal.py                  # 手动/批量信号录入 → decision_signals
-├── daily_signal_review.py         # 信号 vs 实盘复盘（命中率/偏差/虚拟收益）
-├── fetch_joinquant_full.py        # 聚宽模拟盘 API 抓取（持仓+交易日志）
-├── update_portfolio_value_akshare.py  # 实时市值计算（akshare）
-└── daily_run.py                   # 旧版定时入口（已迁移至 OpenClaw cron）
-
-src/financial/
-├── signal_pipeline.py             # 实时行情获取 + 异常检测 + 信号记录到数据库
-├── launcher.py                    # 一键启动器（realtime/summary/warmup）
-├── ai_client.py                   # 支持Kimi/DeepSeek/OpenAI
-├── data_provider.py               # 新浪API实时 + akshare历史K线
-├── market_context.py              # 真实指数数据 + 规则化摘要
-├── portfolio_tracker.py           # FIFO成本 + 防超卖 + 快照
-├── stock_analyzer.py              # 6维度100分制评分
-├── kelly_position.py              # 凯利公式 + 大盘环境调整
-├── signal_tracker.py              # 创建→验证→准确率统计
-├── report_generator.py            # 纯文本微信友好格式
-├── wechat_pusher.py             # 待推送消息 → 微信告警
-└── news_analyzer.py             # 双轨制新闻分析（预留接口）
-
-config/
-├── stock_pool.yaml                # 70只股票监控池（大盘15+中盘30+小盘25）
-├── finance_signals.json           # 信号阈值配置
-└── finance_cron.txt               # 定时任务参考配置
-
-data/
-├── finance.db                     # SQLite 数据库（信号+持仓+市值+复盘）
-└── db_schema.sql                  # 表结构定义
-
-docs/
-└── architecture.md                # 架构设计文档（含mermaid图）
-```
-
----
-
-> **不是研究AI，是用AI打硬仗。**
+> **不是研究 AI，是用 AI 打硬仗。**
