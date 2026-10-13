@@ -38,6 +38,15 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_preopen_run_date ON preopen_runs(run_date)"
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(preopen_runs)")}
+    if "delivery_message_id" not in columns:
+        conn.execute("ALTER TABLE preopen_runs ADD COLUMN delivery_message_id TEXT")
+        columns.add("delivery_message_id")
+        conn.commit()
+    if "news_cutoff_at" not in columns:
+        conn.execute("ALTER TABLE preopen_runs ADD COLUMN news_cutoff_at TEXT")
+        columns.add("news_cutoff_at")
+        conn.commit()
     return conn
 
 
@@ -46,15 +55,16 @@ def today_str() -> str:
     return datetime.now(CST).strftime("%Y-%m-%d")
 
 
-def record_run(run_date: str, run_slot: str, status: str, report_path=None) -> None:
+def record_run(run_date: str, run_slot: str, status: str, report_path=None, news_cutoff_at=None) -> int:
     """记录一次运行"""
     if status not in VALID_STATUS:
         raise ValueError(f"非法状态: {status}")
     conn = _connect()
-    conn.execute(
-        "INSERT INTO preopen_runs (run_date, run_slot, status, report_path) VALUES (?,?,?,?)",
-        (run_date, run_slot, status, str(report_path) if report_path else None),
+    cursor = conn.execute(
+        "INSERT INTO preopen_runs (run_date, run_slot, status, report_path, news_cutoff_at) VALUES (?,?,?,?,?)",
+        (run_date, run_slot, status, str(report_path) if report_path else None, news_cutoff_at),
     )
+    run_id = cursor.lastrowid
     conn.commit()
     conn.close()
     if os.environ.get("NIKO_FINANCE_PG_SHADOW_WRITE") == "1":
@@ -72,18 +82,59 @@ def record_run(run_date: str, run_slot: str, status: str, report_path=None) -> N
             # SQLite remains authoritative during the shadow phase; do not
             # turn a PostgreSQL probe failure into a missing report.
             print(f"[告警] PostgreSQL 影子运行记录失败: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return run_id
 
 
-def mark_delivery(run_date: str, delivery_status: str) -> None:
-    """更新当日最后一次运行的投递状态"""
+def mark_delivery(run_date: str, delivery_status: str, *, run_id: int = None, message_id: str = None) -> None:
+    """Update the exact run; legacy callers may still select the latest date row."""
+    if delivery_status not in ("pending", "delivered", "failed"):
+        raise ValueError(f"非法投递状态: {delivery_status}")
     conn = _connect()
+    predicate = "id=? AND run_date=?" if run_id is not None else "id=(SELECT MAX(id) FROM preopen_runs WHERE run_date=?)"
+    params = [run_id, run_date] if run_id is not None else [run_date]
     conn.execute(
-        """UPDATE preopen_runs SET delivery_status=?
-           WHERE id=(SELECT MAX(id) FROM preopen_runs WHERE run_date=?)""",
-        (delivery_status, run_date),
+        f"""UPDATE preopen_runs SET delivery_status=?,
+            delivery_message_id=COALESCE(?, delivery_message_id) WHERE {predicate}""",
+        [delivery_status, message_id, *params],
     )
     conn.commit()
     conn.close()
+
+
+def get_run(run_id: int) -> dict:
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM preopen_runs WHERE id=?", (run_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def completed_run(run_date: str) -> dict:
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM preopen_runs WHERE run_date=? AND status='complete' ORDER BY id DESC",
+        (run_date,),
+    ).fetchall()
+    conn.close()
+    return next((dict(row) for row in rows if row['report_path'] and Path(row['report_path']).is_file()), None)
+
+
+def previous_news_cutoff(before_date: str) -> tuple[str | None, str]:
+    """Use the last completed preopen run, excluding evening reports and retries."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT run_date, run_slot, news_cutoff_at FROM preopen_runs
+           WHERE run_date < ? AND status='complete' AND run_slot IN ('08:05', '08:15')
+           ORDER BY run_date DESC, id DESC LIMIT 1""", (before_date,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None, "bootstrap"
+    if row[2]:
+        return row[2], "completed_preopen_run"
+    # Legacy rows did not retain the analysis cutoff. Start at that run's slot.
+    return f"{row[0]}T{row[1]}:00+08:00", "legacy_run_slot"
 
 
 def is_done_today(run_date: str = None):
@@ -94,15 +145,8 @@ def is_done_today(run_date: str = None):
         (bool, report_path_or_None)
     """
     run_date = run_date or today_str()
-    conn = _connect()
-    row = conn.execute(
-        """SELECT report_path FROM preopen_runs
-           WHERE run_date=? AND status='complete'
-           ORDER BY id DESC LIMIT 1""",
-        (run_date,),
-    ).fetchone()
-    conn.close()
-    return (True, row[0]) if row else (False, None)
+    row = completed_run(run_date)
+    return (True, row['report_path']) if row else (False, None)
 
 
 def get_today_runs(run_date: str = None) -> list:

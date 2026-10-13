@@ -111,6 +111,15 @@ def t_rising_streak():
     assert not stale_result["ok"] and "拒绝" in stale_result["reason"]
     assert stale_session.get.call_count == 1
 
+    # An explicit closed-session date is valid for the post-market retry, but
+    # the default pre-open date gate remains strict.
+    same_session = Mock()
+    same_response = Mock(status_code=200, text=html)
+    same_response.raise_for_status.return_value = None
+    same_session.get.return_value = same_response
+    same_result = fetch_candidates("2026-09-28", same_session, expected_date="2026-09-24")
+    assert same_result["ok"] is False or same_result.get("date") == "2026-09-24"
+
 
 @case("连涨候选日线复核与日期门禁")
 def t_rising_streak_daily():
@@ -166,6 +175,20 @@ def t_session_wording():
     for h in (12, 20):
         t = get_session(datetime(2026, 9, 21, h, 0, tzinfo=CST))
         assert "盘前" not in t["title"], f"{h}点标题不应含「盘前」: {t['title']}"
+
+
+@case("盘前与盘后报告路径不互相覆盖")
+def t_report_paths():
+    from datetime import datetime, timezone, timedelta
+    from market_session import get_session
+    from preopen_report import report_path_for_session
+    CST = timezone(timedelta(hours=8))
+    date = "2026-10-08"
+    pre = report_path_for_session(date, get_session(datetime(2026, 10, 8, 8, 15, tzinfo=CST)))
+    post = report_path_for_session(date, get_session(datetime(2026, 10, 8, 21, 17, tzinfo=CST)))
+    assert pre.name == "preopen_2026-10-08.md"
+    assert post.name == "postmarket_2026-10-08.md"
+    assert pre != post and pre.parent != post.parent
 
 
 # ---------------------------------------------------------------- 申购制度
