@@ -3,6 +3,7 @@
 # 将交易记录、持仓快照、每日资产自动推送到外部API
 
 import json
+import os
 import urllib.request
 import time
 
@@ -10,7 +11,7 @@ import time
 # 外部API接收地址（部署后替换为实际地址）
 PUSH_API_URL = "https://your-api-endpoint.com/api/v1/joinquant/push"
 # 可选：添加密钥验证
-PUSH_API_KEY = "your-secret-key"
+PUSH_API_KEY = os.environ.get("JOINQUANT_PUSH_API_KEY", "")
 # 是否启用推送
 PUSH_ENABLED = True
 # 推送失败重试次数
@@ -229,7 +230,7 @@ class DailySummary(BaseModel):
 @app.post("/api/v1/joinquant/push")
 async def receive_push(data: dict, x_api_key: Optional[str] = Header(None)):
     # 验证密钥
-    if x_api_key != "your-secret-key":
+    if not PUSH_API_KEY or x_api_key != PUSH_API_KEY:
         return {"status": "error", "msg": "invalid key"}
     
     # 保存到文件或数据库

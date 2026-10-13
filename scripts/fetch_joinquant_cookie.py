@@ -22,29 +22,23 @@ DB_PATH = os.path.join(
 )
 
 def _load_cookies_for_playwright():
-    """加载Cookie：优先从文件读取，否则返回硬编码"""
+    """从用户私有文件加载 Cookie；源码中不提供回退凭据。"""
     cookie_file = os.path.expanduser("~/.jq_cookie.json")
-    if os.path.exists(cookie_file):
-        try:
-            with open(cookie_file, "r", encoding="utf-8") as f:
-                cookies = json.load(f)
-            # Playwright 格式需要 domain/path 等字段
-            result = [c for c in cookies if "joinquant.com" in c.get("domain", "")]
-            if result:
-                print(f"✅ 从 {cookie_file} 加载了 {len(result)} 个Cookie")
-                return result
-        except Exception as e:
-            print(f"读取Cookie文件失败: {e}")
-    
-    print("⚠️ 使用硬编码Cookie（可能已过期）")
-    return [
-        {"name": "uid", "value": "wKgyrWohTYl46gW0mPsjAg==", "domain": "www.joinquant.com", "path": "/"},
-        {"name": "token", "value": "4534895bbc416603f7aa6bf5c6d96fc4e3b11b26", "domain": "www.joinquant.com", "path": "/"},
-        {"name": "tips", "value": "1", "domain": "www.joinquant.com", "path": "/"},
-        {"name": "isFirst", "value": "0", "domain": "www.joinquant.com", "path": "/algorithm/index"},
-        {"name": "getStrategy", "value": "1", "domain": "www.joinquant.com", "path": "/"},
-        {"name": "PHPSESSID", "value": "tb0o5l0ldkjhkuoa7t07hc8t70", "domain": "www.joinquant.com", "path": "/"},
-    ]
+    if not os.path.exists(cookie_file):
+        print(f"⚠️ 未找到 Cookie 文件: {cookie_file}，请先运行 jq_login_guard.py")
+        return []
+    try:
+        with open(cookie_file, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+        # Playwright 格式需要 domain/path 等字段
+        result = [c for c in cookies if "joinquant.com" in c.get("domain", "")]
+        if result:
+            print(f"✅ 从 {cookie_file} 加载了 {len(result)} 个Cookie")
+            return result
+        print(f"⚠️ Cookie 文件中没有 JoinQuant Cookie: {cookie_file}")
+    except Exception as e:
+        print(f"读取Cookie文件失败: {e}")
+    return []
 
 COOKIES = _load_cookies_for_playwright()
 
