@@ -19,4 +19,9 @@ logs/
 *.log
 tmp/
 
-graphify-out/cache/
+# 运行产物与图谱（不进版本库）
+.alerts/
+graphify-out/
+
+# 施工回滚备份（冻结期后入化石层）
+*.pre-*
